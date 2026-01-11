@@ -136,12 +136,131 @@ static constexpr uint32_t TEMP_READ_MS    = 250;      // Temperature read interv
 static constexpr uint32_t STATUS_SEND_MS  = 250;      // Status broadcast interval
 
 // Temperature smoothing
-static constexpr int NUM_SAMPLES          = 5;        // Moving average window
-static constexpr float TEMP_THRESHOLD     = 0.3f;     // Min change to trigger update
+static constexpr int NUM_SAMPLES          = 15;       // Moving average window
 
 // Hardware
 static constexpr bool RELAY_ACTIVE_HIGH   = true;     // Set false for active-LOW relay
 ```
+
+## Thermocouple Calibration
+
+The controller supports three calibration modes for improved temperature accuracy.
+
+### Mode 1: No Calibration (CAL_NONE) - Default
+
+Uses raw MAX6675 readings. Typical accuracy: ±3-5°C.
+
+```cpp
+static constexpr CalibrationMode CAL_MODE = CAL_NONE;
+```
+
+**When to use**: For initial testing or when precise temperature control isn't critical.
+
+### Mode 2: Single-Point Calibration (CAL_SINGLE)
+
+**Best for**: Quick calibration using a reference thermometer at operating temperature.
+
+**Procedure:**
+1. Heat oil to operating temperature (~200°F / 93°C)
+2. Compare MAX6675 reading to a trusted reference thermometer
+3. Calculate offset: `reference_reading - MAX6675_reading`
+4. Update code in `controller/src/main.cpp`:
+
+```cpp
+static constexpr CalibrationMode CAL_MODE = CAL_SINGLE;
+static constexpr float CAL_SINGLE_OFFSET_C = -1.7f;  // Your calculated offset
+```
+
+**Example:**
+- Reference thermometer: 93.3°C (200°F)
+- MAX6675 serial output: 95.0°C
+- Offset calculation: 93.3 - 95.0 = **-1.7°C**
+
+**Advantages**: Quick, simple, one measurement needed
+**Limitations**: Only corrects offset, assumes sensor scale is accurate
+
+### Mode 3: Two-Point Calibration (CAL_TWO_POINT)
+
+**Best for**: Maximum accuracy across full temperature range (0-150°C).
+
+**Procedure:**
+
+**Step 1: Ice Bath Test (0°C / 32°F)**
+1. Fill container with crushed ice and water (slush consistency)
+2. Stir well and let stabilize for 2 minutes
+3. Submerge thermocouple tip (don't touch container sides)
+4. Wait 2 minutes for stabilization
+5. Record the raw reading from serial monitor
+6. Typical reading: 0-2°C
+
+**Step 2: Boiling Water Test (100°C / 212°F)**
+1. Bring water to rolling boil
+2. Submerge thermocouple (don't touch pot bottom/sides)
+3. Wait 1 minute for stabilization
+4. Record the raw reading
+5. **Altitude adjustment**: Mooresville, NC (~700ft) ≈ 99°C
+   - Use [elevation boiling point calculator](https://www.omnicalculator.com/chemistry/boiling-point-altitude) if needed
+
+**Step 3: Update Configuration**
+
+Edit `controller/src/main.cpp`:
+
+```cpp
+static constexpr CalibrationMode CAL_MODE = CAL_TWO_POINT;
+static constexpr float CAL_RAW_ICE_C  = 1.2f;   // Your ice bath reading
+static constexpr float CAL_RAW_BOIL_C = 98.5f;  // Your boiling water reading
+static constexpr float CAL_REF_BOIL_C = 99.0f;  // Adjust for altitude (100°C at sea level)
+```
+
+**Advantages**: Corrects both offset and scale errors, accurate across full range
+**Limitations**: Requires more time and equipment (ice bath + boiling water)
+
+### Calibration Verification
+
+After configuration, upload firmware and check serial output at startup:
+
+```
+========================================
+  Smart Oil Heater - Controller Board
+========================================
+
+[OK] Relay initialized (OFF)
+[OK] Display UART initialized
+     RX: GPIO 16, TX: GPIO 17, Baud: 115200
+
+[CAL] Thermocouple calibration:
+      Mode: TWO-POINT
+      Ice reading:  1.20 C (ref: 0.00 C)
+      Boil reading: 98.50 C (ref: 99.00 C)
+      Calculated scale:  1.0154
+      Calculated offset: -1.22 C
+      Status: CALIBRATED
+```
+
+### Calibration Debug Mode
+
+To see raw vs calibrated temperatures in real-time, edit `controller/src/main.cpp`:
+
+```cpp
+#define CAL_DEBUG_RAW true
+```
+
+Serial output will show:
+```
+[CAL] Raw: 95.00 C -> Calibrated: 93.30 C
+T=93.3C  Set=110.0C  En=1  Relay=ON  Fault=0
+```
+
+**Remember to set back to `false` after calibration testing.**
+
+### Tips for Accurate Calibration
+
+- **Single-point**: Calibrate at your typical operating temperature for best accuracy
+- **Two-point**: Use distilled water for boiling test (tap water minerals affect boiling point)
+- **Thermocouple placement**: Keep tip in center of liquid, away from container walls
+- **Wait for stability**: Allow 1-2 minutes for readings to stabilize
+- **Multiple readings**: Take 3-5 readings and average them
+- **Document results**: Note your calibration values in case firmware needs to be reflashed
 
 ## Troubleshooting
 

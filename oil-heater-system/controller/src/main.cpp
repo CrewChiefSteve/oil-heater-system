@@ -49,6 +49,65 @@ static constexpr uint32_t TEMP_READ_MS    = 250;      // MAX6675 read interval
 static constexpr uint32_t STATUS_SEND_MS  = 250;      // Status broadcast interval
 
 // ============================================================================
+// THERMOCOUPLE CALIBRATION CONFIGURATION
+// ============================================================================
+
+/**
+ * CALIBRATION MODES:
+ *
+ * CAL_NONE      - No calibration, use raw MAX6675 readings
+ *
+ * CAL_SINGLE    - Single-point offset calibration
+ *                 Use when: You have a reference thermometer at operating temp
+ *                 Just corrects offset, assumes scale is accurate
+ *                 Easiest method - compare readings, enter difference
+ *
+ * CAL_TWO_POINT - Two-point calibration (ice bath + boiling water)
+ *                 Use when: You need accuracy across full temperature range
+ *                 Corrects both offset and scale
+ *                 More work but more accurate
+ */
+
+enum CalibrationMode {
+    CAL_NONE,
+    CAL_SINGLE,
+    CAL_TWO_POINT
+};
+
+// >>> SELECT YOUR CALIBRATION MODE HERE <<<
+static constexpr CalibrationMode CAL_MODE = CAL_NONE;
+
+// Set to true when performing calibration tests to see raw vs calibrated values
+#define CAL_DEBUG_RAW false
+
+// ----------------------------------------------------------------------------
+// SINGLE-POINT CALIBRATION (CAL_SINGLE)
+// ----------------------------------------------------------------------------
+// Compare MAX6675 reading to a reference thermometer at any temperature.
+// CAL_SINGLE_OFFSET = reference_temp - raw_reading
+//
+// Example: Reference reads 200°F (93.3°C), MAX6675 reads 95.0°C
+//          CAL_SINGLE_OFFSET = 93.3 - 95.0 = -1.7°C
+
+static constexpr float CAL_SINGLE_OFFSET_C = 0.0f;
+
+// ----------------------------------------------------------------------------
+// TWO-POINT CALIBRATION (CAL_TWO_POINT)
+// ----------------------------------------------------------------------------
+// Step 1: Ice bath test - record raw reading (should be ~0°C)
+// Step 2: Boiling water test - record raw reading (should be ~100°C)
+// Step 3: Enter your readings below
+//
+// Example: Ice bath reads 1.2°C, Boiling water reads 98.5°C
+
+static constexpr float CAL_RAW_ICE_C  = 0.0f;    // Your ice bath reading
+static constexpr float CAL_RAW_BOIL_C = 100.0f;  // Your boiling water reading
+
+// Reference points (adjust boiling for altitude if needed)
+static constexpr float CAL_REF_ICE_C  = 0.0f;    // Ice point (always 0°C)
+static constexpr float CAL_REF_BOIL_C = 100.0f;  // Boiling point (~99°C at altitude)
+
+// ============================================================================
 // UART PROTOCOL (same packets as ESP-NOW version)
 // ============================================================================
 
@@ -127,6 +186,84 @@ void setRelay(bool on) {
     } else {
         digitalWrite(PIN_RELAY, on ? LOW : HIGH);
     }
+}
+
+// ============================================================================
+// THERMOCOUPLE CALIBRATION
+// ============================================================================
+
+/**
+ * Apply calibration to raw thermocouple reading based on selected mode
+ * @param rawTempC Raw temperature from MAX6675 in °C
+ * @return Calibrated temperature in °C
+ */
+float calibrateTemperature(float rawTempC) {
+    switch (CAL_MODE) {
+        case CAL_NONE:
+            // No calibration - return raw reading
+            return rawTempC;
+
+        case CAL_SINGLE:
+            // Single-point: just add offset
+            return rawTempC + CAL_SINGLE_OFFSET_C;
+
+        case CAL_TWO_POINT: {
+            // Two-point: apply scale and offset
+            // Formula: calibrated = (raw - raw_ice) * scale + ref_ice
+            float scale = (CAL_REF_BOIL_C - CAL_REF_ICE_C) /
+                          (CAL_RAW_BOIL_C - CAL_RAW_ICE_C);
+            return (rawTempC - CAL_RAW_ICE_C) * scale + CAL_REF_ICE_C;
+        }
+
+        default:
+            return rawTempC;
+    }
+}
+
+/**
+ * Print calibration information at startup
+ */
+void printCalibrationInfo() {
+    Serial.println("[CAL] Thermocouple calibration:");
+
+    switch (CAL_MODE) {
+        case CAL_NONE:
+            Serial.println("      Mode: NONE (raw readings)");
+            Serial.println("      Status: UNCALIBRATED");
+            break;
+
+        case CAL_SINGLE:
+            Serial.println("      Mode: SINGLE-POINT");
+            Serial.printf("      Offset: %+.2f C\n", CAL_SINGLE_OFFSET_C);
+            if (CAL_SINGLE_OFFSET_C == 0.0f) {
+                Serial.println("      Status: NOT CONFIGURED");
+            } else {
+                Serial.println("      Status: CALIBRATED");
+            }
+            break;
+
+        case CAL_TWO_POINT: {
+            Serial.println("      Mode: TWO-POINT");
+            Serial.printf("      Ice reading:  %.2f C (ref: %.2f C)\n",
+                          CAL_RAW_ICE_C, CAL_REF_ICE_C);
+            Serial.printf("      Boil reading: %.2f C (ref: %.2f C)\n",
+                          CAL_RAW_BOIL_C, CAL_REF_BOIL_C);
+
+            float scale = (CAL_REF_BOIL_C - CAL_REF_ICE_C) /
+                          (CAL_RAW_BOIL_C - CAL_RAW_ICE_C);
+            float offset = CAL_REF_ICE_C - (CAL_RAW_ICE_C * scale);
+            Serial.printf("      Calculated scale:  %.4f\n", scale);
+            Serial.printf("      Calculated offset: %+.2f C\n", offset);
+
+            if (CAL_RAW_ICE_C == 0.0f && CAL_RAW_BOIL_C == 100.0f) {
+                Serial.println("      Status: NOT CONFIGURED");
+            } else {
+                Serial.println("      Status: CALIBRATED");
+            }
+            break;
+        }
+    }
+    Serial.println();
 }
 
 // ============================================================================
@@ -219,10 +356,19 @@ float getSmoothedTemperature() {
         return NAN;
     }
 
-    // Update circular buffer for moving average
-    tempSum -= tempReadings[readingIndex];      // Subtract oldest reading
-    tempReadings[readingIndex] = rawTemp;       // Add new reading
-    tempSum += rawTemp;                         // Update sum
+    // Apply calibration to raw reading
+    float calibratedTemp = calibrateTemperature(rawTemp);
+
+    // Optional debug output for calibration testing
+    #if CAL_DEBUG_RAW
+        Serial.printf("[CAL] Raw: %.2f C -> Calibrated: %.2f C\n",
+                      rawTemp, calibratedTemp);
+    #endif
+
+    // Update circular buffer for moving average (using calibrated value)
+    tempSum -= tempReadings[readingIndex];          // Subtract oldest reading
+    tempReadings[readingIndex] = calibratedTemp;    // Add new calibrated reading
+    tempSum += calibratedTemp;                      // Update sum
 
     // Move to next position in circular buffer
     readingIndex = (readingIndex + 1) % NUM_SAMPLES;
@@ -316,12 +462,15 @@ void setup() {
     Serial.println("[OK] Display UART initialized");
     Serial.printf("     RX: GPIO %d, TX: GPIO %d, Baud: %d\n", UI_RX_PIN, UI_TX_PIN, UI_BAUD);
 
+    // Print calibration configuration
+    Serial.println();
+    printCalibrationInfo();
+
     // Initialize timing
     g_lastCmdMs = millis();
     g_lastTempReadMs = millis();
     g_lastStatusSendMs = millis();
 
-    Serial.println();
     Serial.println("Waiting for display connection...");
     Serial.println();
 }
