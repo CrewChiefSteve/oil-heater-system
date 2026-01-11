@@ -110,15 +110,11 @@ static float    g_currentTempC = NAN;
 static uint8_t  g_currentFault = FAULT_NONE;
 
 // Temperature smoothing - moving average filter
-static constexpr int NUM_SAMPLES = 5;
+static constexpr int NUM_SAMPLES = 15;  // Increased from 5 for more aggressive smoothing
 static float tempReadings[NUM_SAMPLES] = {0};
 static int readingIndex = 0;
 static float tempSum = 0.0f;
 static bool arrayFilled = false;
-
-// Temperature change hysteresis for transmission
-static constexpr float TEMP_THRESHOLD = 0.3f;  // Minimum change to trigger update
-static float lastSentTemp = 0.0f;
 
 // ============================================================================
 // RELAY CONTROL
@@ -346,59 +342,18 @@ void loop() {
         updateThermostat();
     }
 
-    // Send status to display (with state change detection)
+    // Send status to display at regular intervals
     if ((now - g_lastStatusSendMs) >= STATUS_SEND_MS) {
         g_lastStatusSendMs = now;
+        sendStatusToDisplay();
 
-        // Track previous states to detect changes
-        static bool lastRelayState = false;
-        static uint8_t lastFaultCode = FAULT_NONE;
-        static float lastSetpoint = DEFAULT_SETPOINT_C;
-        static bool lastEnabled = false;
-
-        // Check if any important state has changed
-        bool shouldSend = false;
-
-        if (isnan(g_currentTempC)) {
-            // Always send if sensor error
-            shouldSend = true;
-        } else if (fabs(g_currentTempC - lastSentTemp) >= TEMP_THRESHOLD) {
-            // Temperature changed by threshold amount
-            shouldSend = true;
-        }
-
-        // Check for other state changes
-        if (g_relayState != lastRelayState) {
-            shouldSend = true;
-        }
-        if (g_currentFault != lastFaultCode) {
-            shouldSend = true;
-        }
-        if (g_setpointC != lastSetpoint) {
-            shouldSend = true;
-        }
-        if (g_heaterEnabled != lastEnabled) {
-            shouldSend = true;
-        }
-
-        if (shouldSend) {
-            sendStatusToDisplay();
-
-            // Update all tracked states
-            lastSentTemp = g_currentTempC;
-            lastRelayState = g_relayState;
-            lastFaultCode = g_currentFault;
-            lastSetpoint = g_setpointC;
-            lastEnabled = g_heaterEnabled;
-
-            // Serial debug output
-            Serial.printf("T=%.1fC  Set=%.1fC  En=%d  Relay=%s  Fault=%d\n",
-                          isnan(g_currentTempC) ? -999.0f : g_currentTempC,
-                          g_setpointC,
-                          g_heaterEnabled,
-                          g_relayState ? "ON " : "OFF",
-                          g_currentFault);
-        }
+        // Serial debug output
+        Serial.printf("T=%.1fC  Set=%.1fC  En=%d  Relay=%s  Fault=%d\n",
+                      isnan(g_currentTempC) ? -999.0f : g_currentTempC,
+                      g_setpointC,
+                      g_heaterEnabled,
+                      g_relayState ? "ON " : "OFF",
+                      g_currentFault);
     }
 
     delay(10);
