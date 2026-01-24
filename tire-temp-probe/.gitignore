@@ -1,0 +1,18 @@
+# PlatformIO
+.pio/
+.vscode/
+.pioenvs/
+.piolibdeps/
+lib/readme.txt
+
+# Build outputs
+*.o
+*.a
+*.elf
+*.bin
+
+# IDE
+.DS_Store
+*.swp
+*.swo
+*~

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pio pkg install:*)",
+      "Bash(python -m platformio:*)",
+      "Bash(mode)",
+      "Bash(powershell.exe -Command \"Get-WmiObject Win32_PnPEntity | Where-Object {$_Name -match ''COM''} | Select-Object Name\")",
+      "Bash(powershell.exe -Command \"[System.IO.Ports.SerialPort]::getportnames\\(\\)\")",
+      "Bash(pio run:*)",
+      "Bash(dir:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

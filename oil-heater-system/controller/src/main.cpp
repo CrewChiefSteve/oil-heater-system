@@ -14,6 +14,10 @@
 
 #include <Arduino.h>
 #include <max6675.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 // ============================================================================
 // HARDWARE CONFIGURATION - ADJUST TO YOUR WIRING
@@ -47,6 +51,20 @@ static constexpr float MAX_SETPOINT_C     = 150.0f;   // Maximum allowed setpoin
 static constexpr uint32_t CMD_TIMEOUT_MS  = 5000;     // Safety watchdog timeout
 static constexpr uint32_t TEMP_READ_MS    = 250;      // MAX6675 read interval
 static constexpr uint32_t STATUS_SEND_MS  = 250;      // Status broadcast interval
+static constexpr uint32_t BLE_UPDATE_MS   = 500;      // BLE notification interval
+
+// ============================================================================
+// BLE CONFIGURATION
+// ============================================================================
+
+#define BLE_DEVICE_NAME "Heater_Controller"
+// Service UUID - MUST match SERVICE_UUIDS.OIL_HEATER in @crewchiefsteve/ble package
+// See packages/ble/src/constants/uuids.ts for all device UUIDs
+#define BLE_SERVICE_UUID        "4fafc201-0001-459e-8fcc-c5c9c331914b"
+#define BLE_CHAR_TEMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Read/Notify
+#define BLE_CHAR_SETPOINT_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a9"  // Read/Write
+#define BLE_CHAR_STATUS_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"  // Read/Notify
+#define BLE_CHAR_ENABLE_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ab"  // Read/Write
 
 // ============================================================================
 // THERMOCOUPLE CALIBRATION CONFIGURATION
@@ -75,7 +93,7 @@ enum CalibrationMode {
 };
 
 // >>> SELECT YOUR CALIBRATION MODE HERE <<<
-static constexpr CalibrationMode CAL_MODE = CAL_NONE;
+static constexpr CalibrationMode CAL_MODE = CAL_SINGLE;
 
 // Set to true when performing calibration tests to see raw vs calibrated values
 #define CAL_DEBUG_RAW false
@@ -89,7 +107,7 @@ static constexpr CalibrationMode CAL_MODE = CAL_NONE;
 // Example: Reference reads 200°F (93.3°C), MAX6675 reads 95.0°C
 //          CAL_SINGLE_OFFSET = 93.3 - 95.0 = -1.7°C
 
-static constexpr float CAL_SINGLE_OFFSET_C = 0.0f;
+static constexpr float CAL_SINGLE_OFFSET_C = 4.5f;  // Adjusted: was 6.2 (calculated in F by mistake)
 
 // ----------------------------------------------------------------------------
 // TWO-POINT CALIBRATION (CAL_TWO_POINT)
@@ -174,6 +192,66 @@ static float tempReadings[NUM_SAMPLES] = {0};
 static int readingIndex = 0;
 static float tempSum = 0.0f;
 static bool arrayFilled = false;
+
+// BLE globals
+static BLEServer* g_bleServer = nullptr;
+static BLECharacteristic* g_charTemp = nullptr;
+static BLECharacteristic* g_charSetpoint = nullptr;
+static BLECharacteristic* g_charStatus = nullptr;
+static BLECharacteristic* g_charEnable = nullptr;
+static bool g_bleClientConnected = false;
+static uint32_t g_lastBleUpdateMs = 0;
+
+// ============================================================================
+// BLE CALLBACK CLASSES
+// ============================================================================
+
+// Server callbacks - track connection state
+class BleServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+        g_bleClientConnected = true;
+        Serial.println("[BLE] Client connected");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+        g_bleClientConnected = false;
+        Serial.println("[BLE] Client disconnected - restarting advertising");
+        pServer->startAdvertising();
+    }
+};
+
+// Setpoint characteristic callback - receives setpoint in Fahrenheit as string
+class SetpointCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (value.length() > 0) {
+            // Parse Fahrenheit string
+            float setpointF = atof(value.c_str());
+            // Convert F to C
+            float setpointC = (setpointF - 32.0f) * 5.0f / 9.0f;
+            // Constrain and store
+            g_setpointC = constrain(setpointC, MIN_SETPOINT_C, MAX_SETPOINT_C);
+            // Reset watchdog timer (CRITICAL SAFETY)
+            g_lastCmdMs = millis();
+
+            Serial.printf("[BLE] Setpoint write: %.1fF (%.1fC)\n", setpointF, g_setpointC);
+        }
+    }
+};
+
+// Enable characteristic callback - receives "1" or "0"
+class EnableCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic* pCharacteristic) {
+        std::string value = pCharacteristic->getValue();
+        if (value.length() > 0) {
+            g_heaterEnabled = (value[0] == '1');
+            // Reset watchdog timer (CRITICAL SAFETY)
+            g_lastCmdMs = millis();
+
+            Serial.printf("[BLE] Enable write: %d\n", g_heaterEnabled);
+        }
+    }
+};
 
 // ============================================================================
 // RELAY CONTROL
@@ -389,6 +467,105 @@ float getSmoothedTemperature() {
 }
 
 // ============================================================================
+// BLE SERVER INITIALIZATION
+// ============================================================================
+
+void initBLE() {
+    Serial.println("[BLE] Initializing BLE server...");
+
+    // Initialize BLE device
+    BLEDevice::init(BLE_DEVICE_NAME);
+
+    // Create BLE server with callbacks
+    g_bleServer = BLEDevice::createServer();
+    g_bleServer->setCallbacks(new BleServerCallbacks());
+
+    // Create service
+    BLEService* pService = g_bleServer->createService(BLE_SERVICE_UUID);
+
+    // Temperature characteristic (Read + Notify)
+    g_charTemp = pService->createCharacteristic(
+        BLE_CHAR_TEMP_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    g_charTemp->addDescriptor(new BLE2902());
+
+    // Setpoint characteristic (Read + Write)
+    g_charSetpoint = pService->createCharacteristic(
+        BLE_CHAR_SETPOINT_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+    );
+    g_charSetpoint->setCallbacks(new SetpointCallbacks());
+
+    // Status characteristic (Read + Notify)
+    g_charStatus = pService->createCharacteristic(
+        BLE_CHAR_STATUS_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    g_charStatus->addDescriptor(new BLE2902());
+
+    // Enable characteristic (Read + Write)
+    g_charEnable = pService->createCharacteristic(
+        BLE_CHAR_ENABLE_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
+    );
+    g_charEnable->setCallbacks(new EnableCallbacks());
+
+    // Start service
+    pService->start();
+
+    // Start advertising
+    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);  // Helps with iPhone connection
+    pAdvertising->setMinPreferred(0x12);
+    BLEDevice::startAdvertising();
+
+    Serial.println("[OK] BLE server started - advertising as: " BLE_DEVICE_NAME);
+}
+
+// ============================================================================
+// BLE CHARACTERISTIC UPDATES
+// ============================================================================
+
+void updateBLECharacteristics() {
+    if (!g_bleClientConnected) {
+        return;  // No client connected, skip updates
+    }
+
+    // Temperature characteristic - send current temp in Fahrenheit as string
+    char tempStr[16];
+    if (isnan(g_currentTempC)) {
+        strcpy(tempStr, "ERR");
+    } else {
+        float tempF = (g_currentTempC * 9.0f / 5.0f) + 32.0f;
+        snprintf(tempStr, sizeof(tempStr), "%.1f", tempF);
+    }
+    g_charTemp->setValue(tempStr);
+    g_charTemp->notify();
+
+    // Setpoint characteristic - send setpoint in Fahrenheit as string
+    char setpointStr[16];
+    float setpointF = (g_setpointC * 9.0f / 5.0f) + 32.0f;
+    snprintf(setpointStr, sizeof(setpointStr), "%.1f", setpointF);
+    g_charSetpoint->setValue(setpointStr);
+
+    // Status characteristic - send JSON string
+    char statusJson[128];
+    snprintf(statusJson, sizeof(statusJson),
+             "{\"heating\":%s,\"fault\":%d,\"enabled\":%s}",
+             g_relayState ? "true" : "false",
+             g_currentFault,
+             g_heaterEnabled ? "true" : "false");
+    g_charStatus->setValue(statusJson);
+    g_charStatus->notify();
+
+    // Enable characteristic - send current state as "1" or "0"
+    g_charEnable->setValue(g_heaterEnabled ? "1" : "0");
+}
+
+// ============================================================================
 // THERMOSTAT LOGIC
 // ============================================================================
 
@@ -457,6 +634,9 @@ void setup() {
     setRelay(false);
     Serial.println("[OK] Relay initialized (OFF)");
 
+    // Initialize BLE server
+    initBLE();
+
     // Initialize UART to display
     UI_SERIAL.begin(UI_BAUD, SERIAL_8N1, UI_RX_PIN, UI_TX_PIN);
     Serial.println("[OK] Display UART initialized");
@@ -470,6 +650,7 @@ void setup() {
     g_lastCmdMs = millis();
     g_lastTempReadMs = millis();
     g_lastStatusSendMs = millis();
+    g_lastBleUpdateMs = millis();
 
     Serial.println("Waiting for display connection...");
     Serial.println();
@@ -503,6 +684,12 @@ void loop() {
                       g_heaterEnabled,
                       g_relayState ? "ON " : "OFF",
                       g_currentFault);
+    }
+
+    // Update BLE characteristics at 500ms intervals
+    if ((now - g_lastBleUpdateMs) >= BLE_UPDATE_MS) {
+        g_lastBleUpdateMs = now;
+        updateBLECharacteristics();
     }
 
     delay(10);
