@@ -73,29 +73,56 @@ class CharacteristicCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic) {
         std::string value = pCharacteristic->getValue();
         if (value.length() > 0) {
+            String cmd = String(value.c_str());
             Serial.print("Received command: ");
-            Serial.println(value.c_str());
+            Serial.println(cmd);
 
-            // Parse JSON command (for future mobile app control)
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, value.c_str());
+            // Parse string commands per BLE protocol
+            // Expected commands: EMIT:0.95, UNIT:F, UNIT:C, RESET, LASER:ON, LASER:OFF
 
-            if (!error) {
-                if (doc.containsKey("reset")) {
-                    maxTempF = currentTempF;
-                    minTempF = currentTempF;
-                    Serial.println("Max/Min reset via BLE");
+            if (cmd.startsWith("EMIT:")) {
+                // Set emissivity (e.g., "EMIT:0.95")
+                float emissivity = cmd.substring(5).toFloat();
+                if (emissivity >= 0.10 && emissivity <= 1.00) {
+                    // Note: Writing emissivity to MLX90614 EEPROM requires caution
+                    // Limited write cycles (~100k), and incorrect value can brick sensor
+                    // mlx.writeEmissivity(emissivity);  // DANGER: Use with extreme caution!
+                    Serial.printf("Emissivity command received: %.2f (not written to EEPROM)\n", emissivity);
+                    // TODO: If needed, implement RAM-only emissivity compensation
+                } else {
+                    Serial.printf("Invalid emissivity: %.2f (must be 0.10-1.00)\n", emissivity);
                 }
-                if (doc.containsKey("mode")) {
-                    int mode = doc["mode"];
-                    if (mode >= MODE_INSTANT && mode <= MODE_MIN) {
-                        currentMode = (MeasurementMode)mode;
-                    }
-                }
-                if (doc.containsKey("unit")) {
-                    String unit = doc["unit"].as<String>();
-                    useFahrenheit = (unit == "F");
-                }
+            }
+            else if (cmd == "UNIT:F") {
+                // Set Fahrenheit
+                useFahrenheit = true;
+                Serial.println("Unit set to Fahrenheit via BLE");
+            }
+            else if (cmd == "UNIT:C") {
+                // Set Celsius
+                useFahrenheit = false;
+                Serial.println("Unit set to Celsius via BLE");
+            }
+            else if (cmd == "RESET") {
+                // Reset min/max values
+                maxTempF = currentTempF;
+                minTempF = currentTempF;
+                playTone(BUZZ_FREQ_RESET, BUZZ_DURATION_MS);
+                Serial.println("Max/Min reset via BLE");
+            }
+            else if (cmd == "LASER:ON") {
+                // Turn laser on (note: physical trigger button will override)
+                digitalWrite(PIN_LASER, HIGH);
+                Serial.println("Laser ON via BLE");
+            }
+            else if (cmd == "LASER:OFF") {
+                // Turn laser off
+                digitalWrite(PIN_LASER, LOW);
+                Serial.println("Laser OFF via BLE");
+            }
+            else {
+                Serial.print("Unknown command: ");
+                Serial.println(cmd);
             }
         }
     }

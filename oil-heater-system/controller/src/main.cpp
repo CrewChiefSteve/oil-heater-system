@@ -57,14 +57,34 @@ static constexpr uint32_t BLE_UPDATE_MS   = 500;      // BLE notification interv
 // BLE CONFIGURATION
 // ============================================================================
 
+/**
+ * BLE Protocol Constants - Oil Heater Controller
+ *
+ * SINGLE SOURCE OF TRUTH: packages/ble/src/constants/uuids.ts
+ * MUST MATCH: SERVICE_UUIDS.OIL_HEATER, OIL_HEATER_CHARS
+ *
+ * Mobile apps import from @crewchiefsteve/ble package.
+ * Firmware copies values exactly from package - NEVER define locally.
+ *
+ * Last verified: 2026-01-27 after BLE Protocol Audit
+ * See: BLE_PROTOCOL_AUDIT.md in this directory
+ */
+
+// TODO: Update device name to include MAC suffix for multi-device support
+// Example: "Heater_EEFF" where EEFF = last 4 chars of MAC address
 #define BLE_DEVICE_NAME "Heater_Controller"
-// Service UUID - MUST match SERVICE_UUIDS.OIL_HEATER in @crewchiefsteve/ble package
-// See packages/ble/src/constants/uuids.ts for all device UUIDs
+
+// Service UUID
+// packages/ble: SERVICE_UUIDS.OIL_HEATER
+// ✅ UPDATED: Changed from old shared UUID (1fb5) to unique Oil Heater UUID (0001)
 #define BLE_SERVICE_UUID        "4fafc201-0001-459e-8fcc-c5c9c331914b"
-#define BLE_CHAR_TEMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Read/Notify
-#define BLE_CHAR_SETPOINT_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a9"  // Read/Write
-#define BLE_CHAR_STATUS_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"  // Read/Notify
-#define BLE_CHAR_ENABLE_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ab"  // Read/Write
+
+// Characteristics
+// packages/ble: OIL_HEATER_CHARS.*
+#define BLE_CHAR_TEMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // TEMPERATURE - ASCII string
+#define BLE_CHAR_SETPOINT_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a9"  // SETPOINT - ASCII string (R/W)
+#define BLE_CHAR_STATUS_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"  // STATUS - JSON
+#define BLE_CHAR_ENABLE_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ab"  // ENABLE - (R/W)
 
 // ============================================================================
 // THERMOCOUPLE CALIBRATION CONFIGURATION
@@ -552,12 +572,19 @@ void updateBLECharacteristics() {
     g_charSetpoint->setValue(setpointStr);
 
     // Status characteristic - send JSON string
+    // FIXED: Changed format to match mobile-oil-heater app expectations:
+    // - "heater" instead of "heating"
+    // - "safetyShutdown" boolean instead of numeric "fault"
+    // - "sensorError" boolean for sensor faults
     char statusJson[128];
+    bool safetyShutdown = (g_currentFault == FAULT_OVERTEMP || g_currentFault == FAULT_COMM_TIMEOUT);
+    bool sensorError = (g_currentFault == FAULT_SENSOR_OPEN);
+
     snprintf(statusJson, sizeof(statusJson),
-             "{\"heating\":%s,\"fault\":%d,\"enabled\":%s}",
+             "{\"heater\":%s,\"safetyShutdown\":%s,\"sensorError\":%s}",
              g_relayState ? "true" : "false",
-             g_currentFault,
-             g_heaterEnabled ? "true" : "false");
+             safetyShutdown ? "true" : "false",
+             sensorError ? "true" : "false");
     g_charStatus->setValue(statusJson);
     g_charStatus->notify();
 

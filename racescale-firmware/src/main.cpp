@@ -19,6 +19,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
 
+#include <ArduinoJson.h>  // For STATUS JSON encoding
 #include "config.h"
 #include "ble_protocol.h"
 #include "adaptive_filter.h"
@@ -43,12 +44,14 @@ BLECharacteristic* pCalibrationChar = nullptr;
 BLECharacteristic* pTempChar = nullptr;
 BLECharacteristic* pStatusChar = nullptr;
 BLECharacteristic* pCornerChar = nullptr;
+BLECharacteristic* pBatteryChar = nullptr;  // ADDED: Battery percentage characteristic
 
 // ================================================================
 // STATE VARIABLES
 // ================================================================
 
 bool deviceConnected = false;
+bool displayAvailable = false;  // Track if OLED is connected
 float temperature = 70.0f;
 float compensatedCalibration = DEFAULT_CALIBRATION;
 float BASE_CALIBRATION = DEFAULT_CALIBRATION;
@@ -57,7 +60,8 @@ float displayWeight = 0;
 bool isStable = false;
 
 // Corner identity (configurable via BLE/NVS)
-String cornerID = DEFAULT_CORNER;
+String cornerID = DEFAULT_CORNER;  // String name for display/NVS (e.g., "LF")
+uint8_t cornerIDInt = CORNER_LF;   // UInt8 for BLE (0-3)
 String deviceName = "RaceScale_" + String(DEFAULT_CORNER);
 
 // Async temperature reading
@@ -94,9 +98,15 @@ class MyServerCB : public BLEServerCallbacks {
         deviceConnected = true;
         Serial.println("BLE Connected");
 
-        // Send current status on connect
+        // ✅ UPDATED: Send current status as JSON on connect
         if (pStatusChar) {
-            pStatusChar->setValue(isStable ? "stable" : "measuring");
+            StaticJsonDocument<128> doc;
+            doc["zeroed"] = true;  // Assume tared if running
+            doc["calibrated"] = (BASE_CALIBRATION > 0);
+            doc["error"] = "";
+            String json;
+            serializeJson(doc, json);
+            pStatusChar->setValue(json.c_str());
             pStatusChar->notify();
         }
     }
@@ -111,9 +121,10 @@ class MyServerCB : public BLEServerCallbacks {
 
 class TareCB : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) {
-        String val = c->getValue().c_str();
-        if (val.length() > 0 && val.charAt(0) == '1') {
-            Serial.println("BLE Request: TARE");
+        // ✅ UPDATED: Changed from String "1" to UInt8 0x01
+        std::string value = c->getValue();
+        if (value.length() > 0 && value[0] == TARE_COMMAND) {
+            Serial.println("BLE Request: TARE (UInt8 0x01)");
             performPrecisionTare();
         }
     }
@@ -121,40 +132,52 @@ class TareCB : public BLECharacteristicCallbacks {
 
 class CalibrationCB : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) {
-        String val = c->getValue().c_str();
-        float knownWeight = val.toFloat();
+        // ✅ UPDATED: Changed from String to Float32LE (4 bytes)
+        std::string value = c->getValue();
+        if (value.length() == 4) {  // Float32LE is exactly 4 bytes
+            float knownWeight;
+            memcpy(&knownWeight, value.data(), 4);
 
-        if (knownWeight > 0) {
-            float currentReading = scale.get_units(10);
-            float ratio = currentReading / knownWeight;
-            BASE_CALIBRATION = BASE_CALIBRATION * ratio;
+            if (knownWeight > 0) {
+                float currentReading = scale.get_units(10);
+                float ratio = currentReading / knownWeight;
+                BASE_CALIBRATION = BASE_CALIBRATION * ratio;
 
-            updateCalibration();
-            scale.set_scale(compensatedCalibration);
-            saveSettings();
-            filter.reset();
+                updateCalibration();
+                scale.set_scale(compensatedCalibration);
+                saveSettings();
+                filter.reset();
 
-            Serial.printf("✓ BLE Calibrated: Target=%.1f, Factor=%.1f (saved)\n",
-                knownWeight, BASE_CALIBRATION);
+                Serial.printf("✓ BLE Calibrated: Target=%.1f, Factor=%.1f (saved)\n",
+                    knownWeight, BASE_CALIBRATION);
+            }
+        } else {
+            Serial.printf("❌ BLE Calibration error: Expected 4 bytes, got %d\n", value.length());
         }
     }
 };
 
 class CornerCB : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* c) {
-        String val = c->getValue().c_str();
-        val.trim();
-        val.toUpperCase();
-
-        if (val.length() >= 2) {
-            setCornerID(val);
-            Serial.printf("✓ BLE Corner Set: %s (saved, restart to apply to device name)\n",
-                cornerID.c_str());
+        // ✅ UPDATED: Changed from String "LF"/"RF"/etc to UInt8 (0-3)
+        std::string value = c->getValue();
+        if (value.length() > 0) {
+            uint8_t cornerInt = value[0];
+            if (cornerInt >= CORNER_LF && cornerInt <= CORNER_RR) {
+                cornerIDInt = cornerInt;
+                cornerID = cornerUInt8ToString(cornerInt);
+                saveSettings();
+                Serial.printf("✓ BLE Corner Set: %s (%d) (saved, restart to apply to device name)\n",
+                    cornerID.c_str(), cornerInt);
+            } else {
+                Serial.printf("❌ BLE Corner error: Invalid value %d (expected 0-3)\n", cornerInt);
+            }
         }
     }
 
     void onRead(BLECharacteristic* c) {
-        c->setValue(cornerID.c_str());
+        // ✅ UPDATED: Return UInt8 instead of String
+        c->setValue(&cornerIDInt, 1);
     }
 };
 
@@ -235,13 +258,14 @@ void handleSerialCommands() {
 
 void setCornerID(const String& newCorner) {
     cornerID = newCorner;
+    cornerIDInt = cornerStringToUInt8(newCorner);  // ✅ NEW: Convert to UInt8
     preferences.begin(NVS_NAMESPACE, false);
     preferences.putString(NVS_CORNER_KEY, cornerID);
     preferences.end();
 
-    // Update BLE characteristic if available
+    // ✅ UPDATED: Update BLE characteristic with UInt8 value
     if (pCornerChar) {
-        pCornerChar->setValue(cornerID.c_str());
+        pCornerChar->setValue(&cornerIDInt, 1);
     }
 }
 
@@ -251,7 +275,8 @@ void setCornerID(const String& newCorner) {
 
 void setup() {
     Serial.begin(115200);
-    delay(100);
+    delay(1000);  // Longer delay for USB CDC enumeration
+    Serial.flush();
 
     // Release JTAG pins for GPIO use
     gpio_reset_pin(GPIO_NUM_42);
@@ -262,6 +287,7 @@ void setup() {
     Serial.println("=== CrewChiefSteve Standard     ===");
     Serial.println("=== Configurable Corner ID      ===");
     Serial.println("===================================\n");
+    Serial.flush();
 
     // Load settings from NVS FIRST (to get corner ID)
     Serial.println("✓ Loading settings from NVS...");
@@ -272,9 +298,18 @@ void setup() {
     Serial.printf("✓ Device: %s (Corner: %s)\n", deviceName.c_str(), cornerID.c_str());
 
     // Initialize OLED with ESP32-S3 custom I2C pins (SDA=8, SCL=9)
+    // Skip display initialization if not connected (prevents hanging)
+    Serial.println("⚠ OLED disabled - running without display");
+    displayAvailable = false;
+
+    // Uncomment below to enable display if connected:
+    /*
     Wire.begin(I2C_SDA, I2C_SCL);
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
-        Serial.println("❌ ERROR: OLED init failed! Check wiring (SDA=8, SCL=9)");
+    Wire.setTimeout(100);  // 100ms timeout for I2C operations
+    displayAvailable = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS);
+
+    if (!displayAvailable) {
+        Serial.println("⚠ OLED not detected - running without display (SDA=8, SCL=9)");
     } else {
         Serial.println("✓ OLED initialized (0.96in SSD1306)");
         display.clearDisplay();
@@ -287,6 +322,7 @@ void setup() {
         display.display();
         delay(1000);
     }
+    */
 
     // Initialize temperature sensor (DS18B20 on GPIO 6)
     Serial.println("✓ Initializing DS18B20 (GPIO 6)...");
@@ -312,9 +348,9 @@ void setup() {
     updateCalibration();
     scale.set_scale(compensatedCalibration);
 
-    // Initial precision tare
-    Serial.println("✓ Auto-tare (10 samples)...");
-    performPrecisionTare();
+    // Skip auto-tare on startup (scale can be loaded during boot)
+    Serial.println("⚠ Auto-tare DISABLED - use button or BLE to tare manually");
+    // performPrecisionTare();  // Commented out - no auto-tare required
 
     // Start BLE stack
     Serial.printf("✓ Starting BLE (%s)...\n", deviceName.c_str());
@@ -426,11 +462,9 @@ void handleAsyncTemp() {
                 updateCalibration();
                 scale.set_scale(compensatedCalibration);
 
-                // Notify BLE
+                // ✅ UPDATED: Notify BLE with Float32LE instead of String
                 if (deviceConnected && pTempChar) {
-                    char tempBuf[8];
-                    snprintf(tempBuf, sizeof(tempBuf), "%.1f", temperature);
-                    pTempChar->setValue(tempBuf);
+                    pTempChar->setValue((uint8_t*)&temperature, sizeof(float));
                     pTempChar->notify();
                 }
             }
@@ -461,14 +495,16 @@ void performPrecisionTare() {
     Serial.println("\n=== 🔄 PRECISION TARE (10x avg) ===");
 
     // OLED feedback
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setCursor(10, 20);
-    display.println("TARING...");
-    display.setCursor(20, 45);
-    display.setTextSize(1);
-    display.println("Stay still...");
-    display.display();
+    if (displayAvailable) {
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setCursor(10, 20);
+        display.println("TARING...");
+        display.setCursor(20, 45);
+        display.setTextSize(1);
+        display.println("Stay still...");
+        display.display();
+    }
 
     float before = scale.get_units(5);
     Serial.printf("Before tare: %.3f lbs\n", before);
@@ -484,15 +520,17 @@ void performPrecisionTare() {
     Serial.println("Tare complete!\n");
 
     // Brief confirmation
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setCursor(30, 20);
-    display.println("TARED");
-    display.setTextSize(1);
-    display.setCursor(40, 45);
-    display.println("0.00 lbs");
-    display.display();
-    delay(800);
+    if (displayAvailable) {
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setCursor(30, 20);
+        display.println("TARED");
+        display.setTextSize(1);
+        display.setCursor(40, 45);
+        display.println("0.00 lbs");
+        display.display();
+        delay(800);
+    }
 }
 
 // ================================================================
@@ -505,29 +543,33 @@ void performCalibration() {
     Serial.println("  Serial: 'cal 25' (for 25 lbs)");
     Serial.println("  BLE: Send '25'");
 
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.println("CALIBRATION");
-    display.println("MODE ACTIVE");
-    display.setCursor(0, 25);
-    display.println("1. Place known");
-    display.println("   weight (lbs)");
-    display.println("2. Serial: cal 25");
-    display.println("   or BLE: 25");
-    display.setCursor(0, 55);
-    display.printf("Current: %.2f\n", displayWeight);
-    display.display();
+    if (displayAvailable) {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setCursor(0, 0);
+        display.println("CALIBRATION");
+        display.println("MODE ACTIVE");
+        display.setCursor(0, 25);
+        display.println("1. Place known");
+        display.println("   weight (lbs)");
+        display.println("2. Serial: cal 25");
+        display.println("   or BLE: 25");
+        display.setCursor(0, 55);
+        display.printf("Current: %.2f\n", displayWeight);
+        display.display();
+    }
 
     // Show live weight during cal
     unsigned long calStart = millis();
     while (millis() - calStart < 10000) {  // 10s timeout
         if (scale.is_ready()) {
             float raw = scale.get_units(3);
-            display.fillRect(0, 55, 128, 9, SSD1306_BLACK);
-            display.setCursor(0, 55);
-            display.printf("Live: %.2f lbs", raw);
-            display.display();
+            if (displayAvailable) {
+                display.fillRect(0, 55, 128, 9, SSD1306_BLACK);
+                display.setCursor(0, 55);
+                display.printf("Live: %.2f lbs", raw);
+                display.display();
+            }
         }
 
         // Check for serial calibration during this time
@@ -542,6 +584,8 @@ void performCalibration() {
 // ================================================================
 
 void updateDisplay() {
+    if (!displayAvailable) return;  // Skip if no display
+
     display.clearDisplay();
 
     // Intelligent rounding by weight range
@@ -607,24 +651,28 @@ void updateDisplay() {
 void updateBLE() {
     if (!deviceConnected || !pWeightChar) return;
 
-    // Precision formatting
-    char weightStr[16];
-    float w = displayWeight;
-    if (abs(w) < 1.0f) {
-        snprintf(weightStr, sizeof(weightStr), "%.2f", w);
-    } else if (abs(w) < 10.0f) {
-        snprintf(weightStr, sizeof(weightStr), "%.2f", round(w * 20.0f) / 20.0f);
-    } else {
-        snprintf(weightStr, sizeof(weightStr), "%.1f", round(w * 10.0f) / 10.0f);
-    }
-
-    pWeightChar->setValue(weightStr);
+    // FIXED: Changed from string to Float32LE binary format to match mobile-racescale app
+    float weightValue = displayWeight;
+    pWeightChar->setValue((uint8_t*)&weightValue, sizeof(float));
     pWeightChar->notify();
 
-    // Status change only
+    // Battery percentage (0-100) - placeholder, add actual battery monitoring if available
+    if (pBatteryChar) {
+        uint8_t batteryPct = 100;  // TODO: Replace with actual battery reading
+        pBatteryChar->setValue(&batteryPct, 1);
+        pBatteryChar->notify();
+    }
+
+    // ✅ UPDATED: Status change only - send as JSON
     static bool lastStableState = false;
     if (isStable != lastStableState && pStatusChar) {
-        pStatusChar->setValue(isStable ? "stable" : "measuring");
+        StaticJsonDocument<128> doc;
+        doc["zeroed"] = true;  // Assume tared if running
+        doc["calibrated"] = (BASE_CALIBRATION > 0);
+        doc["error"] = "";  // Add error message if needed
+        String json;
+        serializeJson(doc, json);
+        pStatusChar->setValue(json.c_str());
         pStatusChar->notify();
         lastStableState = isStable;
     }
@@ -642,13 +690,14 @@ void initializeBLE() {
 
     BLEService* pService = pServer->createService(SERVICE_UUID);
 
-    // Weight (read+notify) - Primary data
+    // Weight (read+notify) - Primary data, Float32LE binary format
     pWeightChar = pService->createCharacteristic(
         WEIGHT_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
     pWeightChar->addDescriptor(new BLE2902());
-    pWeightChar->setValue("0.00");
+    float initialWeight = 0.0f;
+    pWeightChar->setValue((uint8_t*)&initialWeight, sizeof(float));
 
     // Tare command (write)
     pTareChar = pService->createCharacteristic(
@@ -664,23 +713,30 @@ void initializeBLE() {
     );
     pCalibrationChar->setCallbacks(new CalibrationCB());
 
-    // Temperature (read+notify)
+    // Temperature (read+notify) - ✅ UPDATED: Float32LE instead of String
     pTempChar = pService->createCharacteristic(
         TEMP_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
     pTempChar->addDescriptor(new BLE2902());
-    pTempChar->setValue("70.0");
+    float initialTemp = 70.0f;
+    pTempChar->setValue((uint8_t*)&initialTemp, sizeof(float));
 
-    // Status (read+notify)
+    // Status (read+notify) - ✅ UPDATED: JSON instead of simple String
     pStatusChar = pService->createCharacteristic(
         STATUS_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
     pStatusChar->addDescriptor(new BLE2902());
-    pStatusChar->setValue("ready");
+    StaticJsonDocument<128> statusDoc;
+    statusDoc["zeroed"] = false;
+    statusDoc["calibrated"] = (BASE_CALIBRATION > 0);
+    statusDoc["error"] = "";
+    String statusJson;
+    serializeJson(statusDoc, statusJson);
+    pStatusChar->setValue(statusJson.c_str());
 
-    // Corner ID (read+write+notify) - NEW!
+    // Corner ID (read+write+notify) - ✅ UPDATED: UInt8 (0-3) instead of String
     pCornerChar = pService->createCharacteristic(
         CORNER_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ |
@@ -688,8 +744,17 @@ void initializeBLE() {
         BLECharacteristic::PROPERTY_NOTIFY
     );
     pCornerChar->addDescriptor(new BLE2902());
-    pCornerChar->setValue(cornerID.c_str());
+    pCornerChar->setValue(&cornerIDInt, 1);
     pCornerChar->setCallbacks(new CornerCB());
+
+    // Battery percentage (read+notify) - ADDED to match mobile-racescale app
+    pBatteryChar = pService->createCharacteristic(
+        BATTERY_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pBatteryChar->addDescriptor(new BLE2902());
+    uint8_t initialBattery = 100;
+    pBatteryChar->setValue(&initialBattery, 1);
 
     pService->start();
 
@@ -716,9 +781,10 @@ void loadSettings() {
     BASE_CALIBRATION = preferences.getFloat(NVS_CAL_KEY, DEFAULT_CALIBRATION);
     Serial.printf("📥 NVS: Cal=%.1f (default=%.1f)\n", BASE_CALIBRATION, DEFAULT_CALIBRATION);
 
-    // Load corner ID
+    // Load corner ID (String) and convert to UInt8
     cornerID = preferences.getString(NVS_CORNER_KEY, DEFAULT_CORNER);
-    Serial.printf("📥 NVS: Corner=%s (default=%s)\n", cornerID.c_str(), DEFAULT_CORNER);
+    cornerIDInt = cornerStringToUInt8(cornerID);  // ✅ NEW: Convert to UInt8 for BLE
+    Serial.printf("📥 NVS: Corner=%s (%d) (default=%s)\n", cornerID.c_str(), cornerIDInt, DEFAULT_CORNER);
 
     preferences.end();
 }

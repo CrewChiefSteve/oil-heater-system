@@ -2,46 +2,31 @@
 #include "ble_protocol.h"
 #include "config.h"
 #include <NimBLEDevice.h>
+#include <ArduinoJson.h>
 
 static NimBLEServer* pServer = nullptr;
 static NimBLEService* pService = nullptr;
-static NimBLECharacteristic* pCharTireData = nullptr;
-static NimBLECharacteristic* pCharBrakeData = nullptr;
-static NimBLECharacteristic* pCharSystemStatus = nullptr;
-static NimBLECharacteristic* pCharDeviceConfig = nullptr;
+static NimBLECharacteristic* cornerReadingChar = nullptr;
+static NimBLECharacteristic* systemStatusChar = nullptr;
 
 static bool deviceConnected = false;
-static Corner currentCorner = DEFAULT_CORNER;
 
+// Server callbacks for connection events
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer) {
         deviceConnected = true;
-        Serial.println("BLE client connected");
+        Serial.println("[BLE] Client connected");
     }
 
     void onDisconnect(NimBLEServer* pServer) {
         deviceConnected = false;
-        Serial.println("BLE client disconnected");
-        bleStartAdvertising();
-    }
-};
-
-class ConfigCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pCharacteristic) {
-        std::string value = pCharacteristic->getValue();
-        if (value.length() >= 2) {
-            uint8_t cornerValue = (uint8_t)value[1];
-            if (cornerValue <= CORNER_RR) {
-                currentCorner = (Corner)cornerValue;
-                Serial.print("Corner assignment changed to: ");
-                Serial.println(cornerValue);
-            }
-        }
+        Serial.println("[BLE] Client disconnected");
+        bleStartAdvertising();  // Resume advertising
     }
 };
 
 void bleInit(const char* deviceName) {
-    Serial.println("Initializing BLE...");
+    Serial.println("[BLE] Initializing...");
 
     NimBLEDevice::init(deviceName);
     NimBLEDevice::setPower(BLE_TX_POWER);
@@ -49,129 +34,100 @@ void bleInit(const char* deviceName) {
     pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
 
-    pService = pServer->createService(SERVICE_UUID_TIRE_TEMP);
+    pService = pServer->createService(SERVICE_UUID);
 
-    // Tire data characteristic (notify)
-    pCharTireData = pService->createCharacteristic(
-        CHAR_UUID_TIRE_DATA,
+    // Corner reading characteristic (notify only - JSON)
+    cornerReadingChar = pService->createCharacteristic(
+        CORNER_READING_UUID,
         NIMBLE_PROPERTY::NOTIFY
     );
 
-    // Brake data characteristic (notify)
-    pCharBrakeData = pService->createCharacteristic(
-        CHAR_UUID_BRAKE_DATA,
+    // System status characteristic (notify only - binary)
+    systemStatusChar = pService->createCharacteristic(
+        SYSTEM_STATUS_UUID,
         NIMBLE_PROPERTY::NOTIFY
     );
-
-    // System status characteristic (notify)
-    pCharSystemStatus = pService->createCharacteristic(
-        CHAR_UUID_SYSTEM_STATUS,
-        NIMBLE_PROPERTY::NOTIFY
-    );
-
-    // Device config characteristic (read/write)
-    pCharDeviceConfig = pService->createCharacteristic(
-        CHAR_UUID_DEVICE_CONFIG,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
-    );
-    pCharDeviceConfig->setCallbacks(new ConfigCallbacks());
-
-    // Set initial config value
-    uint8_t configData[2] = {PKT_TYPE_DEVICE_CONFIG, (uint8_t)currentCorner};
-    pCharDeviceConfig->setValue(configData, 2);
 
     pService->start();
 
-    Serial.println("BLE service started");
+    Serial.println("[BLE] Service initialized");
 }
 
 void bleStartAdvertising() {
     NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-    pAdvertising->addServiceUUID(SERVICE_UUID_TIRE_TEMP);
+    pAdvertising->addServiceUUID(SERVICE_UUID);
     pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);  // Functions that help with iPhone connections issue
+    pAdvertising->setMaxPreferred(0x12);
     pAdvertising->start();
-    Serial.println("BLE advertising started");
-}
-
-void bleStopAdvertising() {
-    NimBLEDevice::getAdvertising()->stop();
-    Serial.println("BLE advertising stopped");
+    Serial.println("[BLE] Advertising started");
 }
 
 bool bleIsConnected() {
     return deviceConnected;
 }
 
-void bleTransmitTireData(const TireChannel &tire, Corner corner, uint32_t timestamp) {
-    if (!deviceConnected || !pCharTireData) return;
+void bleTransmitCornerReading(const CornerReading& reading) {
+    if (!deviceConnected || cornerReadingChar == nullptr) {
+        return;
+    }
 
-    uint8_t packet[PKT_SIZE_TIRE_DATA];
-    uint8_t idx = 0;
+    // Build JSON document
+    StaticJsonDocument<200> doc;
 
-    packet[idx++] = PKT_TYPE_TIRE_TEMPS;
+    // Corner name mapping
+    const char* cornerNames[] = {"RF", "LF", "LR", "RR"};
+    doc["corner"] = cornerNames[reading.corner];
 
-    memcpy(&packet[idx], &tire.inside.temperature, sizeof(float));
-    idx += sizeof(float);
+    // Convert Celsius to Fahrenheit (mobile app expects Fahrenheit)
+    float tireInsideF = (reading.tireInside * 9.0f / 5.0f) + 32.0f;
+    float tireMiddleF = (reading.tireMiddle * 9.0f / 5.0f) + 32.0f;
+    float tireOutsideF = (reading.tireOutside * 9.0f / 5.0f) + 32.0f;
+    float brakeTempF = (reading.brakeTemp * 9.0f / 5.0f) + 32.0f;
 
-    memcpy(&packet[idx], &tire.middle.temperature, sizeof(float));
-    idx += sizeof(float);
+    doc["tireInside"] = tireInsideF;
+    doc["tireMiddle"] = tireMiddleF;
+    doc["tireOutside"] = tireOutsideF;
+    doc["brakeTemp"] = brakeTempF;
 
-    memcpy(&packet[idx], &tire.outside.temperature, sizeof(float));
-    idx += sizeof(float);
+    // Serialize to string
+    char jsonBuffer[200];
+    size_t len = serializeJson(doc, jsonBuffer);
 
-    memcpy(&packet[idx], &timestamp, sizeof(uint32_t));
-    idx += sizeof(uint32_t);
+    // Transmit via BLE
+    cornerReadingChar->setValue((uint8_t*)jsonBuffer, len);
+    cornerReadingChar->notify();
 
-    packet[idx++] = (uint8_t)corner;
-
-    pCharTireData->setValue(packet, PKT_SIZE_TIRE_DATA);
-    pCharTireData->notify();
+    Serial.printf("[BLE] TX Corner: %s | In:%.1fF Mid:%.1fF Out:%.1fF Brake:%.1fF\n",
+                  cornerNames[reading.corner],
+                  tireInsideF, tireMiddleF,
+                  tireOutsideF, brakeTempF);
 }
 
-void bleTransmitBrakeData(const BrakeChannel &brake, Corner corner, uint32_t timestamp) {
-    if (!deviceConnected || !pCharBrakeData) return;
+void bleTransmitSystemStatus(const SystemStatus& status, uint8_t capturedCount) {
+    if (!deviceConnected || systemStatusChar == nullptr) {
+        return;
+    }
 
-    uint8_t packet[PKT_SIZE_BRAKE_DATA];
-    uint8_t idx = 0;
+    // Build JSON document
+    // Mobile app expects: { battery: number, isCharging: boolean, firmware: string }
+    StaticJsonDocument<128> doc;
+    doc["battery"] = status.batteryPercent;
+    doc["isCharging"] = status.charging;
+    doc["firmware"] = DEVICE_MODEL;  // "TTP-4CH-v1"
 
-    packet[idx++] = PKT_TYPE_BRAKE_TEMP;
+    // Serialize to string
+    char jsonBuffer[128];
+    size_t len = serializeJson(doc, jsonBuffer);
 
-    memcpy(&packet[idx], &brake.rotor.temperature, sizeof(float));
-    idx += sizeof(float);
+    // Transmit via BLE
+    systemStatusChar->setValue((uint8_t*)jsonBuffer, len);
+    systemStatusChar->notify();
 
-    memcpy(&packet[idx], &timestamp, sizeof(uint32_t));
-    idx += sizeof(uint32_t);
-
-    packet[idx++] = (uint8_t)corner;
-
-    pCharBrakeData->setValue(packet, PKT_SIZE_BRAKE_DATA);
-    pCharBrakeData->notify();
-}
-
-void bleTransmitSystemStatus(const SystemStatus &status) {
-    if (!deviceConnected || !pCharSystemStatus) return;
-
-    uint8_t packet[PKT_SIZE_SYSTEM_STATUS];
-    uint8_t idx = 0;
-
-    packet[idx++] = PKT_TYPE_SYSTEM_STATUS;
-    packet[idx++] = (uint8_t)status.state;
-    packet[idx++] = status.batteryPercent;
-
-    memcpy(&packet[idx], &status.batteryVoltage, sizeof(float));
-    idx += sizeof(float);
-
-    packet[idx++] = status.charging ? 1 : 0;
-
-    memcpy(&packet[idx], &status.uptimeMs, sizeof(uint32_t));
-    idx += sizeof(uint32_t);
-
-    pCharSystemStatus->setValue(packet, PKT_SIZE_SYSTEM_STATUS);
-    pCharSystemStatus->notify();
-}
-
-Corner bleGetCorner() {
-    return currentCorner;
+    Serial.printf("[BLE] TX Status: Bat:%d%% Charging:%s FW:%s\n",
+                  status.batteryPercent,
+                  status.charging ? "Yes" : "No",
+                  DEVICE_MODEL);
 }
 
 void bleUpdate() {
