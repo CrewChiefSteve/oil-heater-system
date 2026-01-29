@@ -71,7 +71,11 @@ struct ScaleConfig {
 #define DEFAULT_CALIBRATION 2843.0f
 
 // Default corner ID (if not set in NVS)
-#define DEFAULT_CORNER "01"
+// Can be overridden via build flag: -D DEFAULT_CORNER=\"RF\"
+// Use corner-specific environments: racescale_LF, racescale_RF, racescale_LR, racescale_RR
+#ifndef DEFAULT_CORNER
+#define DEFAULT_CORNER "LF"  // Fallback if not set via platformio.ini
+#endif
 
 // NVS namespace
 #define NVS_NAMESPACE "racescale_v3"
