@@ -20,6 +20,7 @@
 #include <VL53L1X.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
 #include "config.h"
 
 // ============================================================================
@@ -59,7 +60,11 @@ unsigned long lastContinuousUpdate = 0;
 // Device configuration (loaded from NVS)
 String cornerID = DEFAULT_CORNER;
 String deviceName = String(BLE_DEVICE_NAME_BASE) + "_" + DEFAULT_CORNER;
-String deviceStatus = "idle";  // "idle", "measuring", "stable", "error"
+
+// Status tracking (for JSON generation)
+bool isZeroed = false;         // Has zero calibration been performed
+bool hasSensorError = false;   // ToF sensor communication error
+bool batteryLow = false;       // Battery below threshold
 
 // Button handling
 volatile bool buttonPressed = false;
@@ -77,6 +82,7 @@ void loadSettings();
 void saveZeroOffset();
 void performZeroCalibration();
 void handleSerialCommands();
+void updateStatusCharacteristic();
 
 // ============================================================================
 // BLE SERVER CALLBACKS
@@ -161,21 +167,11 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
                     Serial.println("Continuous mode started");
                     continuousMode = true;
                     lastContinuousUpdate = 0;  // Force immediate update
-                    deviceStatus = "continuous";
-                    if (pStatusCharacteristic != nullptr) {
-                        pStatusCharacteristic->setValue(deviceStatus.c_str());
-                        pStatusCharacteristic->notify();
-                    }
                     break;
 
                 case CMD_CONTINUOUS_STOP:
                     Serial.println("Continuous mode stopped");
                     continuousMode = false;
-                    deviceStatus = "idle";
-                    if (pStatusCharacteristic != nullptr) {
-                        pStatusCharacteristic->setValue(deviceStatus.c_str());
-                        pStatusCharacteristic->notify();
-                    }
                     break;
 
                 case CMD_ZERO_CALIBRATION:
@@ -196,6 +192,28 @@ class CommandCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 // ============================================================================
+// STATUS UPDATE HELPER (v2 JSON FORMAT)
+// ============================================================================
+
+void updateStatusCharacteristic() {
+    if (pStatusCharacteristic == nullptr) {
+        return;
+    }
+
+    // Build STATUS JSON per v2 spec: {"zeroed":bool,"batteryLow":bool,"sensorError":bool}
+    StaticJsonDocument<128> doc;
+    doc["zeroed"] = isZeroed;
+    doc["batteryLow"] = batteryLow;
+    doc["sensorError"] = hasSensorError;
+
+    String statusJson;
+    serializeJson(doc, statusJson);
+
+    pStatusCharacteristic->setValue(statusJson.c_str());
+    pStatusCharacteristic->notify();
+}
+
+// ============================================================================
 // NVS SETTINGS FUNCTIONS
 // ============================================================================
 
@@ -206,18 +224,22 @@ void loadSettings() {
     preferences.end();
 
     deviceName = String(BLE_DEVICE_NAME_BASE) + "_" + cornerID;
+    isZeroed = (zeroOffset != 0.0);  // v2: Track zero calibration state
 
     Serial.println("=== Settings loaded from NVS ===");
     Serial.printf("Corner ID: %s\n", cornerID.c_str());
     Serial.printf("Zero offset: %.1f mm\n", zeroOffset);
     Serial.printf("Device name: %s\n", deviceName.c_str());
+    Serial.printf("Zeroed: %s\n", isZeroed ? "Yes" : "No");
 }
 
 void saveZeroOffset() {
     preferences.begin(NVS_NAMESPACE, false);
     preferences.putFloat(NVS_ZERO_OFFSET_KEY, zeroOffset);
     preferences.end();
+    isZeroed = true;  // v2: Mark as zeroed
     Serial.printf("Zero offset saved to NVS: %.1f mm\n", zeroOffset);
+    updateStatusCharacteristic();  // v2: Update BLE status
 }
 
 // ============================================================================
@@ -274,7 +296,9 @@ void handleSerialCommands() {
         Serial.printf("Zero offset: %.1f mm\n", zeroOffset);
         Serial.printf("BLE connected: %s\n", bleConnected ? "Yes" : "No");
         Serial.printf("Continuous mode: %s\n", continuousMode ? "Yes" : "No");
-        Serial.printf("Status: %s\n", deviceStatus.c_str());
+        Serial.printf("Sensors initialized: %s\n", sensorsInitialized ? "Yes" : "No");
+        Serial.printf("Zeroed: %s\n", isZeroed ? "Yes" : "No");
+        Serial.printf("Sensor error: %s\n", hasSensorError ? "Yes" : "No");
         Serial.println();
     }
     else if (command == "zero") {
@@ -319,15 +343,41 @@ void IRAM_ATTR buttonISR() {
 bool initializeSensors() {
     Serial.println("\n=== Initializing VL53L1X Sensors ===");
 
-    // Configure I2C bus
+    // Configure I2C bus with internal pull-ups
+    pinMode(PIN_SDA, INPUT_PULLUP);
+    pinMode(PIN_SCL, INPUT_PULLUP);
     Wire.begin(PIN_SDA, PIN_SCL);
     Wire.setClock(400000);  // 400kHz I2C speed
 
-    // Configure XSHUT pins as outputs
+    // Configure XSHUT pins as outputs and enable both sensors
     pinMode(PIN_XSHUT_SENSOR1, OUTPUT);
     pinMode(PIN_XSHUT_SENSOR2, OUTPUT);
+    digitalWrite(PIN_XSHUT_SENSOR1, HIGH);  // Enable sensor 1
+    digitalWrite(PIN_XSHUT_SENSOR2, HIGH);  // Enable sensor 2
+    delay(50);  // Give sensors time to boot
 
-    // Hold both sensors in reset (XSHUT LOW)
+    // I2C Bus Scan - check what devices are present
+    Serial.println("\nScanning I2C bus...");
+    byte devicesFound = 0;
+    for (byte address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        byte error = Wire.endTransmission();
+        if (error == 0) {
+            Serial.printf("  Device found at 0x%02X\n", address);
+            devicesFound++;
+        }
+    }
+    if (devicesFound == 0) {
+        Serial.println("  No I2C devices found!");
+        Serial.println("  - Check sensor power connections");
+        Serial.println("  - Check I2C wiring (SDA=GPIO4, SCL=GPIO5)");
+        Serial.println("  - May need external 4.7k pull-up resistors");
+    } else {
+        Serial.printf("  Total: %d device(s) found\n", devicesFound);
+    }
+    Serial.println();
+
+    // Now reset both sensors for proper initialization sequence
     digitalWrite(PIN_XSHUT_SENSOR1, LOW);
     digitalWrite(PIN_XSHUT_SENSOR2, LOW);
     delay(10);
@@ -352,6 +402,18 @@ bool initializeSensors() {
     // === Initialize Sensor 2 ===
     Serial.println("Initializing Sensor 2...");
     digitalWrite(PIN_XSHUT_SENSOR2, HIGH);  // Release sensor 2 from reset
+    delay(50);  // Give sensor time to boot
+
+    // Check if sensor 2 appears on bus at 0x29
+    Serial.println("Checking for Sensor 2 at 0x29...");
+    Wire.beginTransmission(0x29);
+    byte error = Wire.endTransmission();
+    if (error == 0) {
+        Serial.println("  ✓ Sensor 2 detected at 0x29");
+    } else {
+        Serial.printf("  ✗ Sensor 2 NOT detected (error %d)\n", error);
+        Serial.println("  Check: Sensor 2 power, XSHUT2 (GPIO7) connection");
+    }
     delay(10);
 
     sensor2.setBus(&Wire);
@@ -428,7 +490,9 @@ void initializeBLE() {
         CHAR_STATUS_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
-    pStatusCharacteristic->setValue(deviceStatus.c_str());
+
+    // Initialize STATUS characteristic with JSON (will be updated after sensors init)
+    updateStatusCharacteristic();
 
     // Create Corner ID Characteristic (READ + WRITE + NOTIFY)
     pCornerCharacteristic = pService->createCharacteristic(
@@ -504,12 +568,30 @@ void readSensors() {
     } else if (sensor1Distance > 0) {
         averageDistance = sensor1Distance - zeroOffset;
         Serial.println("Using only Sensor 1 (Sensor 2 failed)");
+        hasSensorError = true;  // v2: Partial sensor failure
     } else if (sensor2Distance > 0) {
         averageDistance = sensor2Distance - zeroOffset;
         Serial.println("Using only Sensor 2 (Sensor 1 failed)");
+        hasSensorError = true;  // v2: Partial sensor failure
     } else {
         averageDistance = -1.0;  // Both sensors failed
         Serial.println("ERROR: Both sensors failed!");
+        hasSensorError = true;  // v2: Complete sensor failure
+    }
+
+    // Update status if sensor error state changed
+    static bool lastSensorError = false;
+    if (hasSensorError != lastSensorError) {
+        lastSensorError = hasSensorError;
+        updateStatusCharacteristic();
+    }
+
+    // Clear error if both sensors working
+    if (sensor1Distance > 0 && sensor2Distance > 0) {
+        if (hasSensorError) {
+            hasSensorError = false;
+            updateStatusCharacteristic();
+        }
     }
 
     digitalWrite(PIN_LED, LOW);
@@ -527,6 +609,18 @@ void readBatteryVoltage() {
 
     // Apply voltage divider ratio
     batteryVoltage = voltage * VOLTAGE_DIVIDER_RATIO;
+
+    // Check for low battery (v2: 3.3V threshold for single-cell LiPo)
+    bool wasLow = batteryLow;
+    batteryLow = (batteryVoltage < 3.3);
+
+    // Update status if battery state changed
+    if (batteryLow != wasLow) {
+        updateStatusCharacteristic();
+        if (batteryLow) {
+            Serial.printf("⚠ LOW BATTERY: %.2fV\n", batteryVoltage);
+        }
+    }
 }
 
 // ============================================================================
@@ -563,13 +657,6 @@ void transmitData() {
 void performZeroCalibration() {
     Serial.println("\n=== Zero Calibration ===");
 
-    // Update status
-    deviceStatus = "calibrating";
-    if (pStatusCharacteristic != nullptr) {
-        pStatusCharacteristic->setValue(deviceStatus.c_str());
-        pStatusCharacteristic->notify();
-    }
-
     // Take a fresh reading
     readSensors();
 
@@ -596,13 +683,6 @@ void performZeroCalibration() {
             digitalWrite(PIN_LED, LOW);
             delay(50);
         }
-    }
-
-    // Return to idle status
-    deviceStatus = "idle";
-    if (pStatusCharacteristic != nullptr) {
-        pStatusCharacteristic->setValue(deviceStatus.c_str());
-        pStatusCharacteristic->notify();
     }
 
     Serial.println("=== Calibration complete ===\n");

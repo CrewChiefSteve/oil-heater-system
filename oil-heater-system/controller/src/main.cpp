@@ -13,6 +13,7 @@
  */
 
 #include <Arduino.h>
+#include <WiFi.h>
 #include <max6675.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -70,9 +71,8 @@ static constexpr uint32_t BLE_UPDATE_MS   = 500;      // BLE notification interv
  * See: BLE_PROTOCOL_AUDIT.md in this directory
  */
 
-// TODO: Update device name to include MAC suffix for multi-device support
-// Example: "Heater_EEFF" where EEFF = last 4 chars of MAC address
-#define BLE_DEVICE_NAME "Heater_Controller"
+// Device name built dynamically in setupBLE() using MAC suffix
+// Format: "Heater_XXXX" where XXXX = last 4 chars of MAC address (e.g., "Heater_3C4B")
 
 // Service UUID
 // packages/ble: SERVICE_UUIDS.OIL_HEATER
@@ -84,7 +84,6 @@ static constexpr uint32_t BLE_UPDATE_MS   = 500;      // BLE notification interv
 #define BLE_CHAR_TEMP_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // TEMPERATURE - ASCII string
 #define BLE_CHAR_SETPOINT_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a9"  // SETPOINT - ASCII string (R/W)
 #define BLE_CHAR_STATUS_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26aa"  // STATUS - JSON
-#define BLE_CHAR_ENABLE_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26ab"  // ENABLE - (R/W)
 
 // ============================================================================
 // THERMOCOUPLE CALIBRATION CONFIGURATION
@@ -218,7 +217,6 @@ static BLEServer* g_bleServer = nullptr;
 static BLECharacteristic* g_charTemp = nullptr;
 static BLECharacteristic* g_charSetpoint = nullptr;
 static BLECharacteristic* g_charStatus = nullptr;
-static BLECharacteristic* g_charEnable = nullptr;
 static bool g_bleClientConnected = false;
 static uint32_t g_lastBleUpdateMs = 0;
 
@@ -255,20 +253,6 @@ class SetpointCallbacks : public BLECharacteristicCallbacks {
             g_lastCmdMs = millis();
 
             Serial.printf("[BLE] Setpoint write: %.1fF (%.1fC)\n", setpointF, g_setpointC);
-        }
-    }
-};
-
-// Enable characteristic callback - receives "1" or "0"
-class EnableCallbacks : public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic* pCharacteristic) {
-        std::string value = pCharacteristic->getValue();
-        if (value.length() > 0) {
-            g_heaterEnabled = (value[0] == '1');
-            // Reset watchdog timer (CRITICAL SAFETY)
-            g_lastCmdMs = millis();
-
-            Serial.printf("[BLE] Enable write: %d\n", g_heaterEnabled);
         }
     }
 };
@@ -493,8 +477,13 @@ float getSmoothedTemperature() {
 void initBLE() {
     Serial.println("[BLE] Initializing BLE server...");
 
-    // Initialize BLE device
-    BLEDevice::init(BLE_DEVICE_NAME);
+    // Initialize BLE device with MAC suffix per v2 protocol
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    String deviceName = "Heater_" + mac.substring(8);  // Last 4 MAC chars
+    Serial.printf("[BLE] Device name: %s\n", deviceName.c_str());
+
+    BLEDevice::init(deviceName.c_str());
 
     // Create BLE server with callbacks
     g_bleServer = BLEDevice::createServer();
@@ -523,13 +512,6 @@ void initBLE() {
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
     );
     g_charStatus->addDescriptor(new BLE2902());
-
-    // Enable characteristic (Read + Write)
-    g_charEnable = pService->createCharacteristic(
-        BLE_CHAR_ENABLE_UUID,
-        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE
-    );
-    g_charEnable->setCallbacks(new EnableCallbacks());
 
     // Start service
     pService->start();
@@ -587,9 +569,6 @@ void updateBLECharacteristics() {
              sensorError ? "true" : "false");
     g_charStatus->setValue(statusJson);
     g_charStatus->notify();
-
-    // Enable characteristic - send current state as "1" or "0"
-    g_charEnable->setValue(g_heaterEnabled ? "1" : "0");
 }
 
 // ============================================================================

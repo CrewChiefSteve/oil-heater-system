@@ -16,7 +16,7 @@ void ledInit() {
     Serial.println("LED initialized");
 }
 
-void ledSetColor(uint8_t r, uint8_t g, uint8_t b) {
+void ledSolid(uint8_t r, uint8_t g, uint8_t b) {
     leds[0] = CRGB(r, g, b);
     FastLED.show();
 }
@@ -34,45 +34,82 @@ void ledBlink(uint8_t r, uint8_t g, uint8_t b, uint16_t intervalMs) {
         blinkState = !blinkState;
 
         if (blinkState) {
-            ledSetColor(r, g, b);
+            ledSolid(r, g, b);
         } else {
             ledOff();
         }
     }
 }
 
-void ledUpdate(DeviceState state, bool connected) {
+void ledBreathing(uint8_t r, uint8_t g, uint8_t b) {
+    // Sine wave breathing: 2 second cycle (2000ms period)
+    // millis() / 318.0 gives ~2 second period for full sine wave (2*PI*318 ~= 2000)
+    float breath = (sin(millis() / 318.0) + 1.0) / 2.0;  // 0.0 to 1.0
+    uint8_t brightness = (uint8_t)(breath * 255);
+
+    leds[0] = CRGB(r, g, b);
+    leds[0].nscale8(brightness);
+    FastLED.show();
+}
+
+void ledPulse(uint8_t r, uint8_t g, uint8_t b) {
+    // Fast pulse: 500ms cycle with quick ramp up/down
+    uint32_t phase = millis() % 500;
+    uint8_t brightness;
+
+    if (phase < 100) {
+        // Ramp up: 0-100ms
+        brightness = map(phase, 0, 100, 0, 255);
+    } else if (phase < 200) {
+        // Ramp down: 100-200ms
+        brightness = map(phase, 100, 200, 255, 0);
+    } else {
+        // Off: 200-500ms
+        brightness = 0;
+    }
+
+    leds[0] = CRGB(r, g, b);
+    leds[0].nscale8(brightness);
+    FastLED.show();
+}
+
+void ledUpdate(DeviceState state) {
     switch (state) {
         case STATE_INITIALIZING:
-            ledBlink(255, 255, 0, 200);  // Yellow fast blink
+            ledBlink(255, 200, 0, 100);  // Yellow fast blink
             break;
 
-        case STATE_IDLE:
-            if (connected) {
-                ledSetColor(0, 0, 255);  // Blue solid (connected, idle)
-            } else {
-                ledBlink(0, 255, 0, LED_IDLE_INTERVAL_MS);  // Green slow blink (not connected)
-            }
+        case STATE_WAITING_CONNECTION:
+            ledBreathing(0, 0, 255);  // Blue breathing
             break;
 
-        case STATE_MEASURING:
-            if (connected) {
-                ledSetColor(0, 255, 0);  // Green solid (connected, measuring)
-            } else {
-                ledBlink(0, 255, 0, LED_ACTIVE_INTERVAL_MS);  // Green fast blink
-            }
+        case STATE_CORNER_RF:
+        case STATE_CORNER_LF:
+        case STATE_CORNER_LR:
+        case STATE_CORNER_RR:
+            ledOff();  // Off while waiting for contact
             break;
 
-        case STATE_TRANSMITTING:
-            ledBlink(0, 255, 255, 100);  // Cyan very fast blink
+        case STATE_STABILIZING_RF:
+        case STATE_STABILIZING_LF:
+        case STATE_STABILIZING_LR:
+        case STATE_STABILIZING_RR:
+            ledPulse(255, 200, 0);  // Yellow pulse
             break;
 
-        case STATE_LOW_BATTERY:
-            ledBlink(255, 128, 0, 500);  // Orange blink
+        case STATE_CAPTURED_RF:
+        case STATE_CAPTURED_LF:
+        case STATE_CAPTURED_LR:
+        case STATE_CAPTURED_RR:
+            ledSolid(0, 255, 0);  // Green solid - GO!
+            break;
+
+        case STATE_SESSION_COMPLETE:
+            ledSolid(0, 255, 0);  // Green solid
             break;
 
         case STATE_ERROR:
-            ledBlink(255, 0, 0, LED_ERROR_INTERVAL_MS);  // Red fast blink
+            ledBlink(255, 0, 0, 100);  // Red fast blink
             break;
 
         default:

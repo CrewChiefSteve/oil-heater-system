@@ -110,7 +110,8 @@ void saveCornerConfig(String corner) {
 }
 
 void setupBLE() {
-    NimBLEDevice::init("RaceScale_" + cornerID);
+    String deviceName = "RaceScale_" + cornerID;
+    NimBLEDevice::init(deviceName.c_str());
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
     pServer = NimBLEDevice::createServer();
@@ -222,7 +223,7 @@ void sendBLEUpdates() {
     pBatteryChar->notify();
 
     // Status - JSON string
-    StaticJsonDocument<128> doc;
+    JsonDocument doc;
     doc["weight"] = currentWeight;
     doc["stable"] = !isSettling;
     doc["battery"] = battery;

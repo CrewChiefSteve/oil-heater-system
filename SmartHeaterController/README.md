@@ -105,15 +105,38 @@ This project uses **0x27** (A2=3.3V, A1=3.3V, A0=3.3V)
 - Real-time temperature monitoring with MAX6675 thermocouple
 - Visual feedback with color-coded display (red=heating/error, green=off, cyan=normal)
 
-## Bluetooth
+## BLE Protocol (v2)
 
-The device broadcasts as **"Heater_Controller"** via BLE and provides three characteristics:
+**Device Name**: `Heater_XXXX` (where XXXX = last 4 hex digits of WiFi MAC address)
 
-1. **Temperature** - Current temperature reading
-2. **Setpoint** - Target temperature
-3. **Status** - JSON format: `{"heater":"ON/OFF","safety":"OK/SHUTDOWN","sensor":"OK/ERROR"}`
+**Service UUID**: `4fafc201-0001-459e-8fcc-c5c9c331914b`
 
-Connect with any BLE scanner app (nRF Connect, LightBlue, etc.) to monitor the heater remotely.
+**Characteristics**:
+
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| TEMPERATURE | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | Float32LE (4 bytes) | Current temperature in Celsius |
+| TARGET | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | READ, WRITE, NOTIFY | Float32LE (4 bytes) | Target setpoint in Celsius |
+| STATUS | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | READ, NOTIFY | JSON string | System status (see below) |
+
+**STATUS Characteristic JSON Format**:
+```json
+{
+  "heater": true,
+  "fault": 0,
+  "overheat": false
+}
+```
+
+Fields:
+- `heater` (boolean): Relay state (true = ON, false = OFF)
+- `fault` (number): Fault code (0 = no fault, 1 = sensor error, 2 = over-temperature)
+- `overheat` (boolean): Over-temperature shutdown active
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- Temperature values are IEEE 754 single-precision floats in little-endian byte order
+- Connect with any BLE scanner app (nRF Connect, LightBlue, etc.) to monitor the heater remotely
 
 ## Building
 

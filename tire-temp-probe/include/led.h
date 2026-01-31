@@ -4,19 +4,14 @@
 #include <Arduino.h>
 #include "types.h"
 
-// Initialize LED
 void ledInit();
+void ledUpdate(DeviceState state);  // Call in loop - handles patterns
 
-// Update LED based on device state
-void ledUpdate(DeviceState state, bool connected);
-
-// Set LED to specific color
-void ledSetColor(uint8_t r, uint8_t g, uint8_t b);
-
-// Turn LED off
+// Direct control (optional use)
 void ledOff();
-
-// Blink LED (non-blocking)
+void ledSolid(uint8_t r, uint8_t g, uint8_t b);
 void ledBlink(uint8_t r, uint8_t g, uint8_t b, uint16_t intervalMs);
+void ledBreathing(uint8_t r, uint8_t g, uint8_t b);  // Smooth fade in/out
+void ledPulse(uint8_t r, uint8_t g, uint8_t b);      // Quick pulse pattern
 
 #endif // LED_H

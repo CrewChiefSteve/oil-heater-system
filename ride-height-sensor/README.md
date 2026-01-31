@@ -103,33 +103,33 @@ For 5V max battery: 5V → 2.5V at ADC (safe for ESP32-C3)
 
 VL53L1X modules typically include on-board pull-ups (10kΩ). For long wire runs or multiple devices, add external 4.7kΩ pull-ups to 3.3V on SDA and SCL lines.
 
-## BLE Protocol
+## BLE Protocol (v2)
 
 ### Device Information
 
-- **Device Name**: `RH-Sensor`
+- **Device Name**: `RH-Sensor_XX` (where XX = corner ID: LF, RF, LR, RR)
 - **Service UUID**: `4fafc201-0003-459e-8fcc-c5c9c331914b`
 
 ### Characteristics
 
-#### Height Data (READ/NOTIFY)
-- **UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
-- **Properties**: READ, NOTIFY
-- **Format**: ASCII string
-- **Example**: `"S1:123.4,S2:125.1,AVG:124.2,BAT:4.89"`
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| **HEIGHT** | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | CSV string | Height readings from dual sensors |
+| **COMMAND** | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | WRITE | Single ASCII char | Commands (R/C/S/Z) |
+| **STATUS** | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | READ, NOTIFY | JSON string | System status |
+| **CORNER_ID** | `beb5483e-36e1-4688-b7f5-ea07361b26af` | READ, WRITE, NOTIFY | String | Corner assignment |
 
-**Data Format Breakdown**:
+#### HEIGHT Data Format
+**Example**: `"S1:123.4,S2:125.1,AVG:124.2,IN:4.89,BAT:3.85"`
+
+Fields:
 - `S1`: Sensor 1 distance (mm)
 - `S2`: Sensor 2 distance (mm)
 - `AVG`: Averaged/filtered distance (mm, after outlier rejection and zero calibration)
+- `IN`: Averaged reading in inches
 - `BAT`: Battery voltage (V)
 
-#### Command (WRITE)
-- **UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a9`
-- **Properties**: WRITE
-- **Format**: Single ASCII character
-
-**Supported Commands**:
+#### COMMAND Values
 | Command | Character | Description                              |
 |---------|-----------|------------------------------------------|
 | Single  | `R`       | Take single reading and transmit         |
@@ -137,12 +137,28 @@ VL53L1X modules typically include on-board pull-ups (10kΩ). For long wire runs 
 | Stop    | `S`       | Stop continuous mode                     |
 | Zero    | `Z`       | Zero calibration (store current reading as offset) |
 
+#### STATUS JSON Format
+```json
+{
+  "zeroed": true,
+  "batteryLow": false,
+  "sensorError": false
+}
+```
+
+#### CORNER_ID Values
+String values: `"LF"` (Left Front), `"RF"` (Right Front), `"LR"` (Left Rear), `"RR"` (Right Rear)
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- Device name changes dynamically based on CORNER_ID setting stored in NVS
+
 ### BLE Connection Flow
 
-1. **Discovery**: Scan for device named `RH-Sensor`
+1. **Discovery**: Scan for device named `RH-Sensor_XX` (where XX is corner ID)
 2. **Connect**: Establish BLE connection
-3. **Subscribe**: Enable notifications on Height characteristic
-4. **Command**: Send command character to Command characteristic
+3. **Subscribe**: Enable notifications on HEIGHT and STATUS characteristics
+4. **Command**: Send command character to COMMAND characteristic
 5. **Receive**: Data arrives via notification or read request
 
 ### Example BLE Commands (Python with bleak)
@@ -156,8 +172,8 @@ CHAR_HEIGHT = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 CHAR_COMMAND = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
 async def main():
-    # Find device
-    device = await BleakScanner.find_device_by_name("RH-Sensor")
+    # Find device (example for Left Front corner)
+    device = await BleakScanner.find_device_by_name("RH-Sensor_LF")
 
     async with BleakClient(device) as client:
         # Subscribe to notifications
@@ -244,8 +260,9 @@ pio run --target clean
 
 On first boot, the system will:
 1. Initialize both VL53L1X sensors with address assignment
-2. Start BLE advertising as `RH-Sensor`
-3. Wait for button press or BLE command
+2. Load corner ID from NVS (defaults to "LF" if not set)
+3. Start BLE advertising as `RH-Sensor_XX` (where XX = corner ID)
+4. Wait for button press or BLE command
 
 **Serial output will show**:
 ```
@@ -264,7 +281,7 @@ Timing budget: 33 ms (~30 Hz)
 === Sensor initialization complete ===
 
 === Initializing BLE ===
-BLE Device: RH-Sensor
+BLE Device: RH-Sensor_LF
 Service UUID: 4fafc201-0003-459e-8fcc-c5c9c331914b
 BLE advertising started
 === BLE initialization complete ===
@@ -282,8 +299,8 @@ BLE advertising started
 
 ### Continuous Mode (BLE)
 
-1. Connect to `RH-Sensor` via BLE
-2. Subscribe to Height characteristic notifications
+1. Connect to `RH-Sensor_XX` via BLE (where XX is the corner ID)
+2. Subscribe to HEIGHT and STATUS characteristic notifications
 3. Send `C` command to start continuous readings (10Hz)
 4. Send `S` command to stop
 
@@ -317,8 +334,9 @@ All user-configurable parameters are in `include/config.h`:
 - `OUTLIER_THRESHOLD_MM`: Delta threshold for outlier rejection (default: 10mm)
 
 ### BLE Settings
-- `BLE_DEVICE_NAME`: Change broadcast name
-- `SERVICE_UUID` / `CHAR_*_UUID`: Modify UUIDs if needed
+- `BLE_DEVICE_NAME_BASE`: Base name "RH-Sensor" (corner ID appended automatically)
+- `SERVICE_UUID` / `CHAR_*_UUID`: v2 protocol UUIDs (should not be changed)
+- `DEFAULT_CORNER`: Default corner ID if not set in NVS (default: "LF")
 
 ### Timing
 - `CONTINUOUS_UPDATE_INTERVAL_MS`: Update rate in continuous mode (default: 100ms = 10Hz)
@@ -342,13 +360,14 @@ All user-configurable parameters are in `include/config.h`:
 
 ### BLE Not Advertising
 
-**Symptom**: Cannot find `RH-Sensor` in BLE scan
+**Symptom**: Cannot find `RH-Sensor_XX` in BLE scan
 
 **Solutions**:
-1. Check serial output for "BLE advertising started" message
+1. Check serial output for "BLE advertising started" message and note the corner ID
 2. Ensure ESP32-C3 is powered properly (USB or external 5V)
 3. Try resetting the device
 4. Some phones/computers cache BLE devices - restart Bluetooth on client device
+5. Verify you're scanning for the correct corner ID (device name includes corner: LF/RF/LR/RR)
 
 ### Readings Show -1.0 or 999.9
 
@@ -485,15 +504,17 @@ This sequence runs in `initSensors()` in main.cpp.
 ## BLE Protocol
 
 ### Device Identification
-- **Name:** "RH-Sensor" (or "RH-Sensor_XXXX" with MAC suffix for production)
+- **Name:** `RH-Sensor_XX` (where XX = corner ID: LF, RF, LR, RR)
 - **Service UUID:** `4fafc201-0003-459e-8fcc-c5c9c331914b`
 
 ### Characteristics
 
 | UUID | Properties | Description |
 |------|------------|-------------|
-| `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | Height readings |
-| `beb5483e-36e1-4688-b7f5-ea07361b26a9` | WRITE | Commands |
+| `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | HEIGHT - Dual sensor readings (CSV) |
+| `beb5483e-36e1-4688-b7f5-ea07361b26a9` | WRITE | COMMAND - Control commands |
+| `beb5483e-36e1-4688-b7f5-ea07361b26aa` | READ, NOTIFY | STATUS - System status (JSON) |
+| `beb5483e-36e1-4688-b7f5-ea07361b26af` | READ, WRITE, NOTIFY | CORNER_ID - Corner assignment |
 
 ### Commands (write to CMD characteristic)
 

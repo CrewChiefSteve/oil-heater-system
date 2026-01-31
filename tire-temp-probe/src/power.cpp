@@ -56,10 +56,10 @@ void powerUpdate(SystemStatus &status) {
         status.batteryPercent = powerCalculatePercent(status.batteryVoltage);
         status.charging = powerIsCharging();
 
+        // Low battery detection - log warning but don't change state
+        // (state machine will handle this in Phase 6)
         if (status.batteryPercent <= BATTERY_LOW_THRESHOLD && !status.charging) {
-            if (status.state != STATE_ERROR) {
-                status.state = STATE_LOW_BATTERY;
-            }
+            // Could add warning flag to SystemStatus if needed
         }
     }
 

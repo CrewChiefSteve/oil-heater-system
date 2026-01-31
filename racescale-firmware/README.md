@@ -127,14 +127,19 @@ Open serial monitor at 115200 baud and type commands:
 
 ### Characteristics
 
-| UUID | Type | Description |
-|------|------|-------------|
-| `beb5483e-36e1-4688-b7f5-ea07361b26a8` | Read/Notify | Weight (e.g., "25.35") |
-| `beb5483e-36e1-4688-b7f5-ea07361b26a9` | Write | Tare command (send "1") |
-| `beb5483e-36e1-4688-b7f5-ea07361b26aa` | Write | Calibration (send known weight, e.g., "25") |
-| `beb5483e-36e1-4688-b7f5-ea07361b26ab` | Read/Notify | Temperature (e.g., "72.5") |
-| `beb5483e-36e1-4688-b7f5-ea07361b26ac` | Read/Notify | Status ("stable" or "measuring") |
-| `beb5483e-36e1-4688-b7f5-ea07361b26ad` | Read/Write/Notify | Corner ID (e.g., "LF", "01") |
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| **WEIGHT** | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | Float32LE (4 bytes) | Current weight in kg |
+| **ZERO** | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | WRITE | String | Zero/tare command (send "ZERO") |
+| **TEMPERATURE** | `beb5483e-36e1-4688-b7f5-ea07361b26ab` | READ, NOTIFY | Float32LE (4 bytes) | Load cell temperature in Celsius |
+| **CALIBRATION** | `beb5483e-36e1-4688-b7f5-ea07361b26ac` | READ, WRITE, NOTIFY | Float32LE (4 bytes) | Calibration factor |
+| **STATUS** | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | READ, NOTIFY | String | Status flags (zero/tare state, battery, etc.) |
+| **CORNER_ID** | `beb5483e-36e1-4688-b7f5-ea07361b26af` | READ, WRITE, NOTIFY | UInt8 (1 byte) | Corner assignment: 0=LF, 1=RF, 2=LR, 3=RR |
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- Float32LE values are IEEE 754 single-precision floats in little-endian byte order
+- CORNER_ID uses numeric values: 0=LF, 1=RF, 2=LR, 3=RR (not strings)
 
 ### BLE Connection Example (Web Bluetooth)
 

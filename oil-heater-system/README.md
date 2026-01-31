@@ -89,7 +89,7 @@ T=25.0C  Set=110.0C  En=0  Relay=OFF  Fault=0
 2. **Power both boards**
 3. Controller waits for display connection (sends status at 250ms intervals)
 4. **Display shows status** once UART communication established
-5. **Use display controls** to adjust setpoint (50-150°C range) and enable/disable heating
+5. **Use display controls** to adjust setpoint (50-150°C range)
 6. **Heater cycles on/off** around setpoint with 2°C hysteresis
 
 ## Safety Features
@@ -104,6 +104,41 @@ T=25.0C  Set=110.0C  En=0  Relay=OFF  Fault=0
 **Do NOT rely solely on software for safety!**
 
 Wire a snap-disc thermostat (normally closed) in series with your relay. Set it 10-15°C above your maximum operating temperature. This provides hardware-level protection if the ESP32 crashes with the relay ON.
+
+## BLE Protocol (v2)
+
+The controller board broadcasts status data via BLE for mobile app integration.
+
+**Device Name**: `Heater_XXXX` (where XXXX = last 4 hex digits of WiFi MAC address)
+
+**Service UUID**: `4fafc201-0001-459e-8fcc-c5c9c331914b`
+
+**Characteristics**:
+
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| TEMPERATURE | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | Float32LE (4 bytes) | Current temperature in Celsius |
+| TARGET | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | READ, WRITE, NOTIFY | Float32LE (4 bytes) | Target setpoint in Celsius |
+| STATUS | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | READ, NOTIFY | JSON string | System status (see below) |
+
+**STATUS Characteristic JSON Format**:
+```json
+{
+  "heater": true,
+  "fault": 0,
+  "overheat": false
+}
+```
+
+Fields:
+- `heater` (boolean): Relay state (true = ON, false = OFF)
+- `fault` (number): Fault code (0 = no fault, 1 = sensor error, 2 = over-temperature)
+- `overheat` (boolean): Over-temperature shutdown active
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- Temperature values are IEEE 754 single-precision floats in little-endian byte order
+- Status updates broadcast at ~250ms intervals over ESP-NOW between boards
 
 ## Repository Structure
 

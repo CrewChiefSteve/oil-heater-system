@@ -4,31 +4,25 @@
 #include <Arduino.h>
 #include "types.h"
 
-// Initialize BLE service
-void bleInit(const char* deviceName);
+// Initialize BLE service with corner ID for dynamic device naming
+void bleInit(const char* deviceName, uint8_t cornerID);
 
-// Start BLE advertising
+// Start advertising
 void bleStartAdvertising();
 
-// Stop BLE advertising
-void bleStopAdvertising();
-
-// Check if a client is connected
+// Check connection status
 bool bleIsConnected();
 
-// Transmit tire temperature data
-void bleTransmitTireData(const TireChannel &tire, Corner corner, uint32_t timestamp);
+// Transmit corner reading (v2: JSON format with temp1/temp2/temp3)
+void bleTransmitCornerReading(const CornerReading& reading);
 
-// Transmit brake temperature data
-void bleTransmitBrakeData(const BrakeChannel &brake, Corner corner, uint32_t timestamp);
-
-// Transmit system status
-void bleTransmitSystemStatus(const SystemStatus &status);
-
-// Get current corner assignment
-Corner bleGetCorner();
+// Transmit system status (v2: JSON format with batteryLow/sensorError/probeConnected)
+void bleTransmitSystemStatus(const SystemStatus& status);
 
 // Update BLE service (call in loop)
 void bleUpdate();
+
+// Get corner ID string from UInt8 value (0=LF, 1=RF, 2=LR, 3=RR)
+const char* getCornerString(uint8_t cornerID);
 
 #endif // BLE_SERVICE_H

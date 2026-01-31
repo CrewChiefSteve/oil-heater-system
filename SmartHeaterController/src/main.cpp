@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <WiFi.h>
 #include <TFT_eSPI.h>
 #include <Adafruit_MCP23X17.h>
 #include <BLEDevice.h>
@@ -424,8 +425,13 @@ void calibrateTouch() {
 void initBluetooth() {
     Serial.println("Initializing Bluetooth...");
 
-    // Create BLE Device
-    BLEDevice::init("Heater_Controller");
+    // Create BLE Device with MAC suffix per v2 protocol
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    String deviceName = "Heater_" + mac.substring(8);  // Last 4 MAC chars
+    Serial.printf("BLE Device Name: %s\n", deviceName.c_str());
+
+    BLEDevice::init(deviceName.c_str());
 
     // Create BLE Server
     pServer = BLEDevice::createServer();
@@ -473,7 +479,6 @@ void initBluetooth() {
     BLEDevice::startAdvertising();
 
     Serial.println("Bluetooth initialized");
-    Serial.println("BLE Device name: Heater_Controller");
     Serial.println("Waiting for client connection...");
 }
 

@@ -71,7 +71,7 @@
 #define CHAR_HEIGHT_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"   // Height data (R/N)
 #define CHAR_COMMAND_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a9"  // Commands (W)
 #define CHAR_STATUS_UUID "beb5483e-36e1-4688-b7f5-ea07361b26aa"   // Status (R/N)
-#define CHAR_CORNER_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ad"   // Corner ID (R/W/N)
+#define CHAR_CORNER_UUID "beb5483e-36e1-4688-b7f5-ea07361b26af"   // Corner ID (R/W/N) - v2: changed ad→af
 
 // BLE commands
 #define CMD_SINGLE_READING 'R'     // Take single reading
@@ -91,7 +91,7 @@
 #define NVS_ZERO_OFFSET_KEY "zero_offset"
 
 // Default corner ID (if not set in NVS)
-#define DEFAULT_CORNER "01"
+#define DEFAULT_CORNER "LF"  // v2: Use standard corner names (LF, RF, LR, RR)
 
 // ============================================================================
 // OPERATIONAL PARAMETERS

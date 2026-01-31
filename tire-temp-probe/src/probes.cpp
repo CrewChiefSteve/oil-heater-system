@@ -16,6 +16,16 @@ static float outsideBuffer[TEMP_SMOOTHING_SAMPLES] = {0};
 static float brakeBuffer[TEMP_SMOOTHING_SAMPLES] = {0};
 static uint8_t bufferIndex = 0;
 
+// Stability tracking for auto-capture
+#define STABILITY_SAMPLES 10          // ~1 second at 100ms reads
+#define AMBIENT_THRESHOLD 40.0f       // °C - temps above this = contact detected
+
+static float tempHistory[4][STABILITY_SAMPLES];  // Rolling history per probe [0=in, 1=mid, 2=out, 3=brake]
+static uint8_t historyIndex = 0;
+static uint32_t stableStartTime = 0;
+static bool isCurrentlyStable = false;
+static MeasurementData lastMeasurement;  // Store for capture snapshot
+
 void probesInit() {
     Serial.println("Initializing thermocouple probes...");
 
@@ -90,6 +100,16 @@ void probesUpdate(MeasurementData &data) {
 
     // Update timestamp
     data.timestamp = millis();
+
+    // Store for capture snapshot
+    lastMeasurement = data;
+
+    // Update history for stability detection
+    tempHistory[0][historyIndex] = data.tire.inside.temperature;
+    tempHistory[1][historyIndex] = data.tire.middle.temperature;
+    tempHistory[2][historyIndex] = data.tire.outside.temperature;
+    tempHistory[3][historyIndex] = data.brake.rotor.temperature;
+    historyIndex = (historyIndex + 1) % STABILITY_SAMPLES;
 }
 
 float calculateTireAverage(const TireChannel &tire) {
@@ -112,4 +132,114 @@ float calculateTireAverage(const TireChannel &tire) {
     }
 
     return (validCount > 0) ? (sum / validCount) : 0.0;
+}
+
+// ========== Stability Detection Functions ==========
+
+void probesResetStability() {
+    // Clear history arrays
+    for (int probe = 0; probe < 4; probe++) {
+        for (int sample = 0; sample < STABILITY_SAMPLES; sample++) {
+            tempHistory[probe][sample] = 0.0f;
+        }
+    }
+
+    historyIndex = 0;
+    stableStartTime = 0;
+    isCurrentlyStable = false;
+
+    Serial.println("[PROBES] Stability reset");
+}
+
+bool probesDetectContact() {
+    // Return true if ALL 4 probes read above ambient threshold
+    // Indicates user has placed probes on tire/brake
+
+    if (!lastMeasurement.tire.inside.isValid ||
+        !lastMeasurement.tire.middle.isValid ||
+        !lastMeasurement.tire.outside.isValid ||
+        !lastMeasurement.brake.rotor.isValid) {
+        return false;  // Need all valid readings
+    }
+
+    bool allAboveAmbient =
+        (lastMeasurement.tire.inside.temperature > AMBIENT_THRESHOLD) &&
+        (lastMeasurement.tire.middle.temperature > AMBIENT_THRESHOLD) &&
+        (lastMeasurement.tire.outside.temperature > AMBIENT_THRESHOLD) &&
+        (lastMeasurement.brake.rotor.temperature > AMBIENT_THRESHOLD);
+
+    return allAboveAmbient;
+}
+
+bool probesAreStable() {
+    // Check if all 4 probes have been stable for STABILITY_DURATION_MS
+
+    // Check variance for each probe
+    for (int probe = 0; probe < 4; probe++) {
+        float minVal = tempHistory[probe][0];
+        float maxVal = tempHistory[probe][0];
+
+        for (int i = 1; i < STABILITY_SAMPLES; i++) {
+            if (tempHistory[probe][i] < minVal) minVal = tempHistory[probe][i];
+            if (tempHistory[probe][i] > maxVal) maxVal = tempHistory[probe][i];
+        }
+
+        float variance = maxVal - minVal;
+
+        if (variance > TEMP_STABLE_THRESHOLD) {
+            // Not stable - reset timer
+            stableStartTime = 0;
+            isCurrentlyStable = false;
+            return false;
+        }
+    }
+
+    // All probes stable - check duration
+    if (!isCurrentlyStable) {
+        stableStartTime = millis();
+        isCurrentlyStable = true;
+    }
+
+    return (millis() - stableStartTime) >= STABILITY_DURATION_MS;
+}
+
+float probesGetStabilityProgress() {
+    // Return 0.0-1.0 indicating progress toward stability threshold
+
+    if (!isCurrentlyStable || stableStartTime == 0) {
+        return 0.0f;
+    }
+
+    uint32_t elapsed = millis() - stableStartTime;
+    float progress = (float)elapsed / (float)STABILITY_DURATION_MS;
+
+    return min(progress, 1.0f);
+}
+
+CornerReading probesCapture(Corner corner) {
+    // Snapshot current readings into CornerReading struct
+
+    CornerReading reading;
+    reading.corner = corner;
+    reading.tireInside = lastMeasurement.tire.inside.temperature;
+    reading.tireMiddle = lastMeasurement.tire.middle.temperature;
+    reading.tireOutside = lastMeasurement.tire.outside.temperature;
+    reading.brakeTemp = lastMeasurement.brake.rotor.temperature;
+
+    // Calculate derived values
+    reading.tireAverage = (reading.tireInside + reading.tireMiddle + reading.tireOutside) / 3.0f;
+
+    float minTire = min(min(reading.tireInside, reading.tireMiddle), reading.tireOutside);
+    float maxTire = max(max(reading.tireInside, reading.tireMiddle), reading.tireOutside);
+    reading.tireSpread = maxTire - minTire;
+
+    reading.timestamp = millis();
+
+    Serial.printf("[PROBES] Captured %s | In:%.1f Mid:%.1f Out:%.1f Brake:%.1f\n",
+                  corner == CORNER_RF ? "RF" : corner == CORNER_LF ? "LF" :
+                  corner == CORNER_LR ? "LR" : "RR",
+                  reading.tireInside, reading.tireMiddle,
+                  reading.tireOutside, reading.brakeTemp);
+
+    return reading;
 }

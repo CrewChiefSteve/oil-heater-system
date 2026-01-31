@@ -123,7 +123,7 @@ Edit `include/config.h` to customize:
 1. Power on the device
 2. LED blinks yellow during initialization
 3. LED turns green (slow blink) when ready
-4. Device advertises as "TireTemp_Probe" via BLE
+4. Device advertises as "TireProbe_XX" via BLE (where XX = corner ID: LF, RF, LR, RR)
 
 ### Operation
 
@@ -144,20 +144,43 @@ Connect at 115200 baud to view real-time data:
 Tire [IN/MID/OUT]: 85.2 / 87.5 / 84.8 C  |  Brake: 215.3 C  |  Bat: 78% (CHG)
 ```
 
-### BLE Connection
+### BLE Protocol (v2)
 
-The device broadcasts 3 separate BLE characteristics:
-
-1. **Tire Data** (notify) - 250Hz, 18 bytes
-2. **Brake Data** (notify) - 250Hz, 13 bytes
-3. **System Status** (notify) - 1Hz, 11 bytes
-4. **Device Config** (read/write) - Corner assignment
+**Device Name**: `TireProbe_XX` (where XX = corner ID: LF, RF, LR, RR)
 
 **Service UUID**: `4fafc201-0004-459e-8fcc-c5c9c331914b`
 
 **Note**: This UUID MUST match `SERVICE_UUIDS.TIRE_TEMP_PROBE` in `@crewchiefsteve/ble` package. See `packages/ble/src/constants/uuids.ts` for all device UUIDs.
 
-See `include/ble_protocol.h` for packet format details.
+#### Characteristics
+
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| **CORNER_READING** | `beb5483e-36e1-4688-b7f5-ea07361b26ac` | NOTIFY | JSON string | Corner temperature data on capture |
+| **SYSTEM_STATUS** | `beb5483e-36e1-4688-b7f5-ea07361b26aa` | NOTIFY | Binary (8 bytes) | Battery, state, capture count |
+
+#### CORNER_READING Format (JSON)
+Sent when a corner is captured during sequential workflow:
+```json
+{
+  "corner": "RF",
+  "tireInside": 85.0,
+  "tireMiddle": 88.5,
+  "tireOutside": 82.3,
+  "brakeTemp": 176.5
+}
+```
+All temperatures in Celsius.
+
+#### SYSTEM_STATUS Format (Binary, 8 bytes)
+```
+[State:1] [BatteryPct:1] [BatteryV:4f] [Charging:1] [CapturedCount:1]
+```
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- Device controls capture sequence (RF → LF → LR → RR)
+- Mobile app is a passive receiver that logs data
 
 ## Temperature Measurement
 

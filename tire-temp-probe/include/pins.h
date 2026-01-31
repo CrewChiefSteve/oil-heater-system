@@ -12,6 +12,10 @@
 #define CS_TIRE_OUT     7   // Outside tire probe
 #define CS_BRAKE        15  // Brake rotor probe
 
+// I2C Bus (for SSD1306 OLED display)
+#define I2C_SDA         8   // I2C data line
+#define I2C_SCL         9   // I2C clock line
+
 // Status LED
 #define RGB_LED         48  // WS2812B RGB LED (single pixel)
 

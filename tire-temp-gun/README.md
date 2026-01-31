@@ -192,15 +192,20 @@ Edit `include/config.h` to customize:
 - **Center**: Large temperature reading
 - **Bottom**: Ambient temperature
 
-### BLE Mobile App Integration
+### BLE Protocol (v2)
 
 **Device Name**: `TireTempGun`
 
 **Service UUID**: `4fafc201-0005-459e-8fcc-c5c9c331914b`
 
-#### Temperature Characteristic (Notify)
-**UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
+#### Characteristics
 
+| Characteristic | UUID | Properties | Data Format | Description |
+|----------------|------|------------|-------------|-------------|
+| **TEMPERATURE** | `beb5483e-36e1-4688-b7f5-ea07361b26a8` | READ, NOTIFY | JSON string | Temperature readings and mode |
+| **COMMAND** | `beb5483e-36e1-4688-b7f5-ea07361b26a9` | WRITE | JSON string | Control commands |
+
+#### TEMPERATURE Characteristic (Notify)
 JSON payload format (sent every 250ms when connected):
 ```json
 {
@@ -214,15 +219,17 @@ JSON payload format (sent every 250ms when connected):
 }
 ```
 
-#### Command Characteristic (Write)
-**UUID**: `beb5483e-36e1-4688-b7f5-ea07361b26a9`
-
+#### COMMAND Characteristic (Write)
 Send JSON commands from mobile app:
 ```json
 {"reset": true}           // Reset max/min values
 {"mode": 2}               // Set mode (0-3)
 {"unit": "C"}             // Set unit ("F" or "C")
 ```
+
+**Notes**:
+- All NOTIFY characteristics include BLE2902 descriptors for iOS compatibility
+- JSON format used for both characteristics for ease of parsing in mobile apps
 
 ### Typical Workflow
 
