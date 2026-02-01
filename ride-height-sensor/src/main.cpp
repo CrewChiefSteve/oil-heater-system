@@ -44,6 +44,7 @@ NimBLECharacteristic* pCornerCharacteristic = nullptr;
 
 // Sensor state
 bool sensorsInitialized = false;
+bool sensor2Available = false;  // Track if sensor 2 is present
 float sensor1Distance = 0.0;  // mm
 float sensor2Distance = 0.0;  // mm
 float averageDistance = 0.0;  // mm
@@ -354,26 +355,56 @@ bool initializeSensors() {
     pinMode(PIN_XSHUT_SENSOR2, OUTPUT);
     digitalWrite(PIN_XSHUT_SENSOR1, HIGH);  // Enable sensor 1
     digitalWrite(PIN_XSHUT_SENSOR2, HIGH);  // Enable sensor 2
-    delay(50);  // Give sensors time to boot
+    Serial.printf("XSHUT1 (GPIO%d): %s\n", PIN_XSHUT_SENSOR1, digitalRead(PIN_XSHUT_SENSOR1) ? "HIGH" : "LOW");
+    Serial.printf("XSHUT2 (GPIO%d): %s\n", PIN_XSHUT_SENSOR2, digitalRead(PIN_XSHUT_SENSOR2) ? "HIGH" : "LOW");
+    delay(100);  // Give sensors more time to boot
 
     // I2C Bus Scan - check what devices are present
-    Serial.println("\nScanning I2C bus...");
+    Serial.println("\nScanning I2C bus at 100kHz...");
     byte devicesFound = 0;
     for (byte address = 1; address < 127; address++) {
         Wire.beginTransmission(address);
         byte error = Wire.endTransmission();
         if (error == 0) {
-            Serial.printf("  Device found at 0x%02X\n", address);
+            Serial.printf("  ✓ Device found at 0x%02X\n", address);
             devicesFound++;
+        } else if (address == 0x29) {
+            // VL53L1X default address - show detailed error
+            Serial.printf("  ✗ No response at 0x29 (VL53L1X default) - Error: %d\n", error);
         }
     }
+
     if (devicesFound == 0) {
-        Serial.println("  No I2C devices found!");
-        Serial.println("  - Check sensor power connections");
-        Serial.println("  - Check I2C wiring (SDA=GPIO4, SCL=GPIO5)");
-        Serial.println("  - May need external 4.7k pull-up resistors");
+        Serial.println("\n✗ No I2C devices found!");
+
+        // Try slower speed
+        Serial.println("\nRetrying at 50kHz (slower)...");
+        Wire.setClock(50000);
+        delay(100);
+
+        for (byte address = 0x20; address < 0x30; address++) {
+            Wire.beginTransmission(address);
+            byte error = Wire.endTransmission();
+            if (error == 0) {
+                Serial.printf("  ✓ Device found at 0x%02X\n", address);
+                devicesFound++;
+            }
+        }
+
+        if (devicesFound == 0) {
+            Serial.println("  Still no devices found at 50kHz");
+            Serial.println("\nDiagnostics:");
+            Serial.printf("  - SDA pin (GPIO%d) configured\n", PIN_SDA);
+            Serial.printf("  - SCL pin (GPIO%d) configured\n", PIN_SCL);
+            Serial.println("  - Internal pull-ups enabled");
+            Serial.println("\nPossible issues:");
+            Serial.println("  1. VL53L1X sensors not receiving power");
+            Serial.println("  2. External pull-up resistors weak/disconnected");
+            Serial.println("  3. I2C wiring reversed (SDA/SCL swapped)");
+            Serial.println("  4. Faulty sensors");
+        }
     } else {
-        Serial.printf("  Total: %d device(s) found\n", devicesFound);
+        Serial.printf("\n✓ Total: %d device(s) found\n", devicesFound);
     }
     Serial.println();
 
@@ -420,35 +451,42 @@ bool initializeSensors() {
     sensor2.setTimeout(500);
 
     if (!sensor2.init()) {
-        Serial.println("ERROR: Failed to initialize Sensor 2!");
-        return false;
+        Serial.println("⚠ Sensor 2 not available - continuing with single sensor");
+        sensor2Available = false;
+    } else {
+        // Change sensor 2 address from default 0x29 to 0x31
+        sensor2.setAddress(SENSOR2_ADDRESS);
+        Serial.printf("Sensor 2 address set to 0x%02X\n", SENSOR2_ADDRESS);
+        sensor2Available = true;
     }
 
-    // Change sensor 2 address from default 0x29 to 0x31
-    sensor2.setAddress(SENSOR2_ADDRESS);
-    Serial.printf("Sensor 2 address set to 0x%02X\n", SENSOR2_ADDRESS);
-
-    // === Configure both sensors ===
+    // === Configure sensors ===
     // Set distance mode (short=1.3m, long=4m)
     if (DISTANCE_MODE_LONG) {
         sensor1.setDistanceMode(VL53L1X::Long);
-        sensor2.setDistanceMode(VL53L1X::Long);
+        if (sensor2Available) sensor2.setDistanceMode(VL53L1X::Long);
         Serial.println("Distance mode: LONG (4m range)");
     } else {
         sensor1.setDistanceMode(VL53L1X::Short);
-        sensor2.setDistanceMode(VL53L1X::Short);
+        if (sensor2Available) sensor2.setDistanceMode(VL53L1X::Short);
         Serial.println("Distance mode: SHORT (1.3m range)");
     }
 
     // Set timing budget (measurement time)
     sensor1.setMeasurementTimingBudget(TIMING_BUDGET_MS * 1000);  // Convert ms to us
-    sensor2.setMeasurementTimingBudget(TIMING_BUDGET_MS * 1000);
+    if (sensor2Available) {
+        sensor2.setMeasurementTimingBudget(TIMING_BUDGET_MS * 1000);
+    }
     Serial.printf("Timing budget: %d ms (~%d Hz)\n", TIMING_BUDGET_MS, 1000 / TIMING_BUDGET_MS);
 
     // Start continuous ranging
     sensor1.startContinuous(TIMING_BUDGET_MS);
-    sensor2.startContinuous(TIMING_BUDGET_MS);
-    Serial.println("Continuous ranging started on both sensors");
+    if (sensor2Available) {
+        sensor2.startContinuous(TIMING_BUDGET_MS);
+        Serial.println("Continuous ranging started on both sensors");
+    } else {
+        Serial.println("Continuous ranging started on sensor 1 only");
+    }
 
     Serial.println("=== Sensor initialization complete ===\n");
     return true;
@@ -540,13 +578,17 @@ void readSensors() {
         sensor1Distance = distance1;
     }
 
-    // Read sensor 2
-    uint16_t distance2 = sensor2.read(false);
-    if (sensor2.timeoutOccurred()) {
-        Serial.println("WARNING: Sensor 2 timeout!");
-        sensor2Distance = -1.0;
+    // Read sensor 2 (if available)
+    if (sensor2Available) {
+        uint16_t distance2 = sensor2.read(false);
+        if (sensor2.timeoutOccurred()) {
+            Serial.println("WARNING: Sensor 2 timeout!");
+            sensor2Distance = -1.0;
+        } else {
+            sensor2Distance = distance2;
+        }
     } else {
-        sensor2Distance = distance2;
+        sensor2Distance = -1.0;  // Mark as unavailable
     }
 
     // Calculate average with outlier rejection

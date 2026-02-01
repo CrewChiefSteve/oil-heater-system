@@ -1,291 +1,214 @@
-# BLE Mock Firmware Suite - Mobile App Testing
+# CrewChiefSteve Mock Firmware — BLE Protocol v2
 
-Test firmware for all race car telemetry devices. Allows testing mobile apps without physical sensors.
-
-## Overview
-
-This suite contains 5 mock firmware projects that broadcast realistic data over BLE:
-
-| Project | Device Type | ESP32s Needed | Purpose |
-|---------|-------------|---------------|---------|
-| **racescale-mock** | Corner weight scale | 4 (one per corner) | Test 4-scale simultaneous connection |
-| **oil-heater-mock** | Oil heater controller | 1 | Test temperature control UI |
-| **ride-height-mock** | Ultrasonic ride height | 1 | Test continuous measurement mode |
-| **tire-temp-probe-mock** | 3-point tire probe | 1 | Test sequential corner workflow |
-| **tire-temp-gun-mock** | IR temperature gun | 1 | Test spot/continuous modes |
+ESP32-C3 firmware that simulates all 5 CrewChiefSteve BLE devices for mobile app development and testing without real hardware.
 
 ## Quick Start
 
-### 1. Install PlatformIO
-
 ```bash
-# Install PlatformIO Core CLI
-pip install platformio
+# Open in PlatformIO, build, and flash to ESP32-C3
+pio run -t upload
 
-# Or use existing installation
-pio --version
+# Open serial monitor
+pio device monitor --baud 115200
 ```
 
-### 2. Flash Any Mock Firmware
+Then use serial commands to switch between devices:
 
-```bash
-# Example: RaceScale
-cd mock-firmware/racescale-mock
-pio run --target upload
-pio device monitor
-
-# Example: Oil Heater
-cd mock-firmware/oil-heater-mock
-pio run --target upload
-pio device monitor
+```
+device 0   → Oil Heater (Heater_MOCK)
+device 1   → RaceScale (RaceScale_LF)
+device 2   → Ride Height (RH-Sensor_LF)
+device 3   → Tire Probe (TireProbe_LF)
+device 4   → Tire Temp Gun (TireTempGun)
+corner 1   → Switch to RF (then restart: device 1)
+status     → Print current simulation state
+help       → Show all commands
 ```
 
-### 3. Test with Mobile App
+## What It Does
 
-1. Open mobile app
-2. Scan for BLE devices
-3. Connect to mock device
-4. Verify data appears correctly
-5. Test write commands (tare, setpoint, etc.)
+Runs a single BLE device at a time (selectable via serial) that generates realistic fake sensor data. Your React Native mobile apps connect to it just like real hardware — same service UUIDs, characteristic UUIDs, data formats, and update rates.
 
-## UUID Reference
+**Key behaviors:**
+- Oil heater temperature ramps toward setpoint with PID-like cycling
+- Scale weights use damped oscillation to simulate a car being placed on the pad
+- Ride height sensors have dual-sensor jitter with configurable delta
+- Tire probe temps drift realistically per corner with camber effects
+- Temp gun simulates scanning across tire surface
+- Batteries slowly drain over time
+- All WRITE characteristics are fully functional (setpoint, tare, commands, etc.)
 
-All UUIDs match EXACTLY what mobile apps expect after BLE protocol alignment.
+## Device Protocol Reference
 
-### Service UUIDs
-```cpp
-Oil Heater:   4fafc201-1fb5-459e-8fcc-c5c9c331914b
-RaceScale:    4fafc201-1fb5-459e-8fcc-c5c9c331914b  (same as heater)
-Ride Height:  4fafc201-0003-459e-8fcc-c5c9c331914b
-Tire Probe:   4fafc201-0004-459e-8fcc-c5c9c331914b
-Tire Temp Gun: 4fafc201-0005-459e-8fcc-c5c9c331914b
+### Oil Heater (0001)
+
+| Characteristic | UUID (26xx) | Properties | Format | Example |
+|---|---|---|---|---|
+| TEMPERATURE | 26a8 | READ, NOTIFY | String | `"180.5"` |
+| SETPOINT | 26a9 | READ, WRITE, NOTIFY | String | `"180.0"` |
+| STATUS | 26aa | READ, NOTIFY | JSON | `{"heater":true,"safetyShutdown":false,"sensorError":false}` |
+
+**Service UUID:** `4fafc201-0001-459e-8fcc-c5c9c331914b`
+**BLE Name:** `Heater_MOCK`
+
+**Simulation:** Starts at ambient (72°F), heats toward setpoint at ~5°F/sec. Cycles on/off near setpoint. Safety shutdown above 260°F. Write to SETPOINT to change target (100–250°F range).
+
+### RaceScale (0002)
+
+| Characteristic | UUID (26xx) | Properties | Format | Example |
+|---|---|---|---|---|
+| WEIGHT | 26a8 | READ, NOTIFY | Float32LE | `350.5` (4 bytes) |
+| CALIBRATION | 26aa | WRITE | Float32LE | Known weight |
+| TEMPERATURE | 26ab | READ, NOTIFY | Float32LE | `75.2` (load cell °F) |
+| STATUS | 26ac | READ, NOTIFY | JSON | `{"zeroed":true,"calibrated":true,"error":""}` |
+| TARE | 26ad | WRITE | UInt8 | `0x01` to zero |
+| BATTERY | 26ae | READ, NOTIFY | UInt8 | `85` (percent) |
+| CORNER_ID | 26af | READ, WRITE, NOTIFY | UInt8 | `0`–`3` |
+
+**Service UUID:** `4fafc201-0002-459e-8fcc-c5c9c331914b`
+**BLE Name:** `RaceScale_XX` (XX = LF/RF/LR/RR)
+
+**Simulation:** Starts empty (0 lbs), then after 5 seconds simulates placing a car — weight overshoots and settles via damped oscillation. Typical weights: LF=548, RF=532, LR=572, RR=558 lbs. Write 0x01 to TARE to zero.
+
+### Ride Height Sensor (0003)
+
+| Characteristic | UUID (26xx) | Properties | Format | Example |
+|---|---|---|---|---|
+| HEIGHT | 26a8 | READ, NOTIFY | CSV String | `"S1:123.4,S2:125.1,AVG:124.2,IN:4.89,BAT:3.85"` |
+| CMD | 26a9 | WRITE | String | `R`, `C`, `S`, `Z` |
+| STATUS | 26aa | READ, NOTIFY | JSON | `{"zeroed":false,"batteryLow":false,"sensorError":false}` |
+| CORNER_ID | 26af | READ, WRITE, NOTIFY | UInt8 | `0`–`3` |
+
+**Service UUID:** `4fafc201-0003-459e-8fcc-c5c9c331914b`
+**BLE Name:** `RH-Sensor_XX` (XX = LF/RF/LR/RR)
+
+**Commands:** `R` = single reading, `C` = continuous mode, `S` = stop, `Z` = zero calibration
+
+**Simulation:** Dual sensors with ~1.7mm offset and ±0.2mm jitter. Starts in continuous mode (2 Hz). Write `Z` to zero. Height varies slightly per corner.
+
+### Tire Temperature Probe (0004) — v2 JSON-Only
+
+| Characteristic | UUID (26xx) | Properties | Format | Example |
+|---|---|---|---|---|
+| CORNER_READING | 26a8 | NOTIFY | JSON | `{"corner":0,"tireInside":185.2,"tireMiddle":188.5,"tireOutside":182.3,"brakeTemp":425.7}` |
+| STATUS | 26aa | READ, NOTIFY | JSON | `{"battery":85,"isCharging":false,"firmware":"2.0.0"}` |
+| CORNER_ID | 26af | READ, WRITE | UInt8 | `0`–`3` |
+
+**Service UUID:** `4fafc201-0004-459e-8fcc-c5c9c331914b`
+**BLE Name:** `TireProbe_XX` (XX = LF/RF/LR/RR)
+
+**v2 Note:** Binary TIRE_DATA/BRAKE_DATA characteristics removed. Only JSON CORNER_READING is used.
+
+**Simulation:** Three tire zones with camber-effect spread (inner hotter). Front corners run slightly hotter. Brake temps: fronts ~450°F, rears ~400°F. All temps drift slowly with ±1.5°F noise.
+
+### Tire Temperature Gun (0005)
+
+| Characteristic | UUID (26xx) | Properties | Format | Example |
+|---|---|---|---|---|
+| TEMPERATURE | 26a8 | NOTIFY | JSON | `{"temp":185.5,"amb":72.3,"max":195.2,"min":175.8,"bat":85,"mode":0}` |
+| COMMAND | 26a9 | WRITE | String | `EMIT:0.95`, `UNIT:F`, `UNIT:C`, `RESET`, `LASER:ON`, `LASER:OFF` |
+
+**Service UUID:** `4fafc201-0005-459e-8fcc-c5c9c331914b`
+**BLE Name:** `TireTempGun`
+
+**Note:** No STATUS characteristic. Battery is in the TEMPERATURE JSON.
+
+**Simulation:** Continuous mode at 4 Hz. Temp drifts and periodically jumps to simulate scanning different tire areas. Tracks session min/max. Write `RESET` to clear min/max.
+
+## Common UUID Reference
+
+All characteristics use the pattern: `beb5483e-36e1-4688-b7f5-ea07361b26XX`
+
+| XX | Typical Purpose |
+|----|-----------------|
+| a8 | Primary data (temp, weight, height, reading) |
+| a9 | Secondary / command |
+| aa | Status or calibration |
+| ab | Temperature (scale) or config |
+| ac | Status (scale) or extra |
+| ad | Tare (scale) |
+| ae | Battery (scale) |
+| af | Corner ID |
+
+## Corner IDs
+
+| Value | Corner |
+|-------|--------|
+| 0 | LF (Left Front) |
+| 1 | RF (Right Front) |
+| 2 | LR (Left Rear) |
+| 3 | RR (Right Rear) |
+
+## Architecture
+
+```
+src/
+├── main.cpp              Entry point, serial UI, BLE lifecycle
+├── config.h              All UUIDs, constants, simulation defaults
+├── simulator.h           SimValue, SimBattery, DampedOscillator, TempDrifter
+├── mock_oil_heater.h     Oil heater simulation + BLE service
+├── mock_racescale.h      RaceScale simulation + BLE service
+├── mock_ride_height.h    Ride height simulation + BLE service
+├── mock_tire_probe.h     Tire probe simulation + BLE service (JSON-only)
+└── mock_tire_temp_gun.h  Tire temp gun simulation + BLE service
 ```
 
-### Characteristic UUIDs (RaceScale Example)
-```cpp
-Weight:       beb5483e-36e1-4688-b7f5-ea07361b26a8  // Float32LE
-Tare:         beb5483e-36e1-4688-b7f5-ea07361b26ad  // Write UInt8
-Battery:      beb5483e-36e1-4688-b7f5-ea07361b26ae  // UInt8
-Corner ID:    beb5483e-36e1-4688-b7f5-ea07361b26af  // String
+**Design decisions:**
+- **NimBLE** instead of Bluedroid — lighter weight, better for C3's limited RAM
+- **Single device at a time** — the C3 can run one device cleanly; switching tears down and rebuilds BLE
+- **Header-only device modules** — simple dependency chain, no linker issues
+- **Realistic simulation** — values drift smoothly, not random noise; batteries drain; weights settle with oscillation
+- **Full WRITE support** — all writable characteristics respond correctly
+
+## ESP32-C3 Notes
+
+- Single-core RISC-V — no FreeRTOS task pinning needed
+- ~280KB free heap after NimBLE + one device service
+- NimBLE automatically adds BLE2902 descriptors for NOTIFY characteristics (required for iOS)
+- Central/Observer roles disabled in build flags to save ~30KB RAM
+
+## Build Configuration
+
+Override defaults via `platformio.ini` build flags:
+
+```ini
+build_flags = 
+    -D MOCK_DEFAULT_DEVICE=1    ; Start as RaceScale
+    -D MOCK_DEFAULT_CORNER=2    ; Start as LR corner
 ```
 
-See individual project READMEs for complete UUID lists.
-
-## Critical Data Format Notes
-
-### RaceScale - Binary Floats!
-Weight MUST be Float32LE binary (NOT ASCII string):
-```cpp
-float weight = 285.5;
-pWeightChar->setValue((uint8_t*)&weight, sizeof(float));  // Correct
-pWeightChar->setValue("285.5");  // WRONG!
-```
-
-### Oil Heater - ASCII Strings
-Temperature sent as ASCII string:
-```cpp
-char tempStr[16];
-snprintf(tempStr, sizeof(tempStr), "%.1f", 185.5);
-pTempChar->setValue(tempStr);  // "185.5"
-```
-
-### Tire Probe - 12-byte Binary
-3 tire temps as contiguous Float32LE (12 bytes total):
-```cpp
-float tireData[3] = {185.5, 192.3, 188.1};
-pTireChar->setValue((uint8_t*)tireData, 12);
-```
-
-## Hardware Requirements
-
-### Minimum Setup (All Projects)
-- ESP32 dev board (any model: DevKit V1, NodeMCU-32S, etc.)
-- USB cable for programming/power
-- No sensors needed (all data is simulated)
-
-### Multi-Scale Setup (RaceScale Only)
-- **4x ESP32 dev boards** (one per corner: LF, RF, LR, RR)
-- 4x USB cables or USB power bank with 4 ports
-- Program each with same firmware, configure different corner IDs
-
-## Button Functions
-
-All projects use **BOOT button (GPIO 0)** on ESP32 dev board:
-
-- **racescale-mock**: Tare (zero weight)
-- **oil-heater-mock**: Toggle safety shutdown
-- **ride-height-mock**: Single reading
-- **tire-temp-probe-mock**: Trigger corner reading
-- **tire-temp-gun-mock**: Take new temperature reading
-
-## Serial Commands
-
-All projects support serial commands at **115200 baud**:
-
-### Common Commands
-- `STATUS` - Show current state (all projects)
-
-### Project-Specific Commands
-See individual project READMEs for complete command lists.
-
-## Testing Workflow
-
-### Per-Device Testing
-1. Flash ESP32 with mock firmware
-2. Open serial monitor (115200 baud)
-3. Verify device boots and shows BLE advertising
-4. Open mobile app
-5. Scan for BLE devices
-6. Connect to mock device
-7. Verify data displays correctly
-8. Test button triggers
-9. Test serial commands
-10. Test write characteristics (if applicable)
-11. Disconnect/reconnect
-
-### Multi-Device Testing (RaceScale)
-1. Flash 4 ESP32s with racescale-mock
-2. Configure each via serial: `LF`, `RF`, `LR`, `RR`
-3. Restart all 4 ESP32s
-4. Power all 4 simultaneously
-5. Open mobile app
-6. Scan - should find: Scale-LF, Scale-RF, Scale-LR, Scale-RR
-7. Connect to all 4 (app supports multi-connection)
-8. Verify weight from each corner
-9. Test tare on individual corners
-10. Verify simultaneous updates
+Or switch at runtime via serial commands.
 
 ## Troubleshooting
 
-### Device Not Found in BLE Scan
-- Check serial monitor shows "BLE started: [DeviceName]"
-- Verify BLE is enabled on mobile device
-- Try restarting ESP32
-- Move closer to ESP32 (BLE range ~10m)
+**Mobile app can't find mock device:**
+- Check serial output for "Advertising started"
+- Verify the mobile app scans for the correct service UUID
+- Ensure you're simulating the right device type
+- Try `reset` in serial to restart advertising
 
-### Can't Connect
-- Check only one mobile app connects at a time
-- Restart ESP32 if stuck in connected state
-- Check serial shows "Client connected" on connection
+**App connects but no data:**
+- Make sure the app subscribes to NOTIFY characteristics
+- Check serial for "Client connected" message
+- NimBLE requires the app to enable notifications via CCCD descriptor
 
-### Wrong Data Format
-- Verify mobile app expects format shown in README
-- Check serial output shows data being transmitted
-- Review characteristic UUIDs match exactly
-- Check binary vs. ASCII string format
+**Heap too low / crash:**
+- Run `heap` in serial to check free memory
+- The C3 should have ~280KB free — if much lower, something is leaking
+- `reset` will teardown and rebuild cleanly
 
-### Updates Not Received
-- Verify characteristic has NOTIFY property
-- Check connection state in serial monitor
-- Confirm update interval (varies by project)
+**Wrong data format:**
+- This firmware follows BLE_PROTOCOL_REFERENCE.md exactly
+- If the mobile app expects different formats, update the app to match the spec
 
-## Data Simulation Details
+## Protocol Compliance
 
-All projects generate realistic mock data:
+This mock firmware is built against `BLE_PROTOCOL_REFERENCE.md` (2026-01-27) as the single source of truth. Key v2 rules enforced:
 
-### RaceScale
-- Weight: 250-400 lbs per corner
-- Variance: ±0.5 lbs (settling) → ±0.1 lbs (stable)
-- Battery: 85% (drains slowly)
-- Temperature: ~72°F (slight drift)
-
-### Oil Heater
-- Heating rate: ~2°F/second
-- Cooling rate: ~0.5°F/second
-- Setpoint range: 100-250°F
-- Hysteresis: ±5°F
-
-### Ride Height
-- Sensor range: 100-150mm
-- Variance: ±0.5mm
-- Sensor delta: <5mm (realistic)
-- Conversion: mm to inches
-
-### Tire Probe
-- Tire temps: 150-220°F (inside hottest)
-- Brake temps: 300-600°F
-- Sequential workflow: RF→LF→LR→RR
-- Battery: 85% (drains slowly)
-
-### Tire Temp Gun
-- Spot readings: 150-220°F
-- Ambient: 65-85°F
-- Emissivity: 0.95 (configurable 0.1-1.0)
-- Modes: Spot (2s) or Continuous (1s)
-
-## Development Notes
-
-### Libraries Used
-- **NimBLE-Arduino** (v1.4.1): Lightweight BLE stack
-- **ArduinoJson** (v7.0.0): JSON serialization
-
-### Why NimBLE vs ESP32 BLE?
-- Lower memory footprint
-- Better multi-connection support (RaceScale needs 4 simultaneous)
-- More stable on ESP32
-
-### Adding New Mock Devices
-1. Copy an existing project as template
-2. Update UUIDs to match mobile app
-3. Implement data simulation logic
-4. Update notification intervals
-5. Add serial commands for testing
-6. Create comprehensive README
-7. Test with mobile app
-
-## Project Structure
-
-```
-mock-firmware/
-├── README.md                    # This file
-├── racescale-mock/
-│   ├── platformio.ini
-│   ├── src/main.cpp            # 4-corner scale (configurable)
-│   └── README.md
-├── oil-heater-mock/
-│   ├── platformio.ini
-│   ├── src/main.cpp            # Heater controller
-│   └── README.md
-├── ride-height-mock/
-│   ├── platformio.ini
-│   ├── src/main.cpp            # Dual ultrasonic sensors
-│   └── README.md
-├── tire-temp-probe-mock/
-│   ├── platformio.ini
-│   ├── src/main.cpp            # Sequential corner workflow
-│   └── README.md
-└── tire-temp-gun-mock/
-    ├── platformio.ini
-    ├── src/main.cpp            # IR temperature gun
-    └── README.md
-```
-
-## Benefits of Mock Firmware
-
-1. **No Hardware Needed**: Test apps without building physical devices
-2. **Repeatable Testing**: Consistent data for regression testing
-3. **Edge Case Testing**: Simulate faults, low battery, sensor errors
-4. **Multi-Device Testing**: Test 4-scale setup without 4 load cells
-5. **Development Speed**: Flash ESP32 in seconds vs. building hardware
-6. **Protocol Validation**: Verify UUIDs and data formats match exactly
-
-## Next Steps
-
-1. **Flash First Mock**: Start with oil-heater-mock (simplest)
-2. **Test Mobile App**: Verify connection and data display
-3. **Try RaceScale**: Test multi-device setup with 4 ESP32s
-4. **Explore Commands**: Use serial to trigger different states
-5. **Test Edge Cases**: Simulate faults, low battery, etc.
-6. **Validate Protocol**: Ensure all UUIDs and formats match
-
-## Support
-
-Each project has a detailed README with:
-- UUIDs and data formats
-- Serial commands
-- Button functions
-- Testing checklist
-- Troubleshooting guide
-- Expected behavior timeline
-
-Check project READMEs for specific details.
+- ✅ Characteristic UUID pattern: `beb5483e-36e1-4688-b7f5-ea07361b26XX`
+- ✅ BLE2902 descriptors on all NOTIFY characteristics (NimBLE auto-adds)
+- ✅ STATUS is JSON on all devices that have it
+- ✅ CORNER_ID is UInt8 (0=LF, 1=RF, 2=LR, 3=RR)
+- ✅ No ENABLE characteristic on Oil Heater
+- ✅ Tire Probe uses JSON-only (no binary TIRE_DATA/BRAKE_DATA)
+- ✅ No legacy UUID (`4fafc201-1fb5-...`)
